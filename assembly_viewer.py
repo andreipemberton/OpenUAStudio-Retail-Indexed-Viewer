@@ -11,6 +11,8 @@ View modes:
                      formula: brightness = 1 - shade/256, amesh.cpp)
   - materials        each texture/material block gets a distinct color
   - textured         textured preview using OLPL UVs (u/256)
+  - textured_indexed reconstructed retail indexed rendering using the
+                     source palette plus SHADERMP/TRACYRMP lookup tables
 
 Extras: SEN2 bounding/culling volume overlay (read-only), axes, grid,
 VANM texture animation playback (play/pause, loop or ping-pong).
@@ -23,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import bisect
 import math
+import time
 
 from PySide6.QtCore import (
     QEvent,
@@ -62,6 +65,8 @@ from geometry_editor import (
     GeometryEditSession,
     mat_apply,
 )
+from indexed_family_adapter import IndexedFamilyAdapter
+from indexed_renderer import IndexedPiece, IndexedRasterizer
 
 MATERIAL_COLORS = [
     QColor(96, 170, 255), QColor(255, 170, 80), QColor(120, 220, 120),
@@ -70,7 +75,14 @@ MATERIAL_COLORS = [
     QColor(140, 150, 255),
 ]
 
-VIEW_MODES = ("wireframe", "solid", "materials", "textured")
+VIEW_MODES = (
+    "wireframe",
+    "solid",
+    "materials",
+    "textured",
+    "textured_indexed",
+)
+TEXTURED_VIEW_MODES = ("textured", "textured_indexed")
 VIEW_PRESET_ANGLES = {
     "Front": (0.0, 0.0),
     "Back": (180.0, 0.0),
@@ -133,6 +145,7 @@ class _RenderPayload:
     face: ViewFace
     image: QImage | None
     front_facing: bool
+    uv_mapping_valid: bool
 
 
 @dataclass
@@ -458,6 +471,14 @@ class AssetViewport(QWidget):
         self._owner_bounds: dict[str, tuple] = {}
         self._texture_image_cache: dict[tuple, QImage] = {}
         self._show_diag_overlay = True
+        self._indexed_adapter: IndexedFamilyAdapter | None = None
+        self._indexed_unavailable_reason = "no AssetFamily is loaded"
+        self._indexed_runtime_error = ""
+        self._last_indexed_stats: dict = {}
+        self._last_render_requested_mode = "not_rendered"
+        self._last_effective_renderer = "not_rendered"
+        self._last_render_fallback_reason = ""
+        self._last_render_background = "not_rendered"
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None
@@ -533,6 +554,7 @@ class AssetViewport(QWidget):
         self._anim_playing = False
         self._anim_speed = 1.0
         self._anim_clock_ms = 0.0
+        self._anim_last_tick: float | None = None
         self._anim_states: dict[int, tuple[int, int]] = {}  # mat -> (frame, dir)
         self._anim_left_ms: dict[int, float] = {}
 
@@ -603,8 +625,11 @@ class AssetViewport(QWidget):
     def load_family(self, family: AssetFamily,
                     visible_owners: set[str] | None = None,
                     keep_camera: bool = False,
-                    primary_owner: str | None = None) -> None:
+                    primary_owner: str | None = None,
+                    reuse_indexed_adapter: bool = False) -> None:
         same_family = family is self._family_ref
+        cached_adapter = self._indexed_adapter
+        cached_reason = self._indexed_unavailable_reason
         previous_bounds = (
             dict(self._owner_bounds) if keep_camera and same_family else {})
         if not same_family:
@@ -612,6 +637,18 @@ class AssetViewport(QWidget):
         selected = self._selected_owner
         self.clear()
         self._family_ref = family
+        if same_family and reuse_indexed_adapter:
+            self._indexed_adapter = cached_adapter
+            self._indexed_unavailable_reason = cached_reason
+        else:
+            self._indexed_adapter, self._indexed_unavailable_reason = (
+                IndexedFamilyAdapter.try_create(family))
+        self._indexed_runtime_error = ""
+        self._last_indexed_stats = {}
+        self._last_render_requested_mode = "not_rendered"
+        self._last_effective_renderer = "not_rendered"
+        self._last_render_fallback_reason = ""
+        self._last_render_background = "not_rendered"
         self._visible_owners = visible_owners
         self._selected_owner = selected
         self._primary_owner = primary_owner
@@ -676,7 +713,8 @@ class AssetViewport(QWidget):
         was_editing = self._edit_session is not None
         target_owner = self._selected_owner if was_editing else None
         self.load_family(self._family_ref, owners, keep_camera=True,
-                         primary_owner=self._primary_owner)
+                         primary_owner=self._primary_owner,
+                         reuse_indexed_adapter=True)
         if was_editing and target_owner is not None:
             self.enter_edit_mode(target_owner)
         self.update()
@@ -2433,28 +2471,31 @@ class AssetViewport(QWidget):
                     ))
             return
 
+        covered: dict[int, int] = {}
+        for group in groups:
+            for poly_id, _uvs, _shade in group.faces:
+                covered[poly_id] = covered.get(poly_id, 0) + 1
         if primary:
-            covered: dict[int, int] = {}
-            for group in groups:
-                for poly_id, _uvs, _shade in group.faces:
-                    covered[poly_id] = covered.get(poly_id, 0) + 1
             self._duplicate_polys = {p for p, n in covered.items() if n > 1}
-            unmapped = [p for p in range(len(polygons))
-                        if p not in covered and len(polygons[p]) >= 3]
-            if unmapped:
-                unmapped_mat = self._ensure_material(
-                    "__unmapped__", "UNMAPPED (no ATTS entry)", "", family,
-                    material_index,
-                )
-                self._materials[unmapped_mat].color = QColor(255, 40, 200)
-                for poly_id in unmapped:
-                    polygon = polygons[poly_id]
-                    self._faces.append(ViewFace(
-                        vertices=[world_points[i] for i in polygon],
-                        uvs=[], material=unmapped_mat, shade=0,
-                        poly_id=poly_id, mapped=False, primary=True,
-                        owner=owner,
-                    ))
+        # Keep uncovered geometry from every visible family object in the
+        # assembled scene.  Restricting this audit to the primary object let a
+        # child/descendant polygon disappear from an allegedly exact export.
+        unmapped = [p for p in range(len(polygons))
+                    if p not in covered and len(polygons[p]) >= 3]
+        if unmapped:
+            unmapped_mat = self._ensure_material(
+                "__unmapped__", "UNMAPPED (no ATTS entry)", "", family,
+                material_index,
+            )
+            self._materials[unmapped_mat].color = QColor(255, 40, 200)
+            for poly_id in unmapped:
+                polygon = polygons[poly_id]
+                self._faces.append(ViewFace(
+                    vertices=[world_points[i] for i in polygon],
+                    uvs=[], material=unmapped_mat, shade=0,
+                    poly_id=poly_id, mapped=False, primary=primary,
+                    owner=owner, block_index=-1,
+                ))
 
         for block_index, group in enumerate(groups):
             block = group.block
@@ -2561,7 +2602,74 @@ class AssetViewport(QWidget):
     def set_mode(self, mode: str) -> None:
         if mode in VIEW_MODES:
             self._mode = mode
+            self._last_render_requested_mode = "not_rendered"
+            self._last_effective_renderer = "not_rendered"
+            self._last_render_fallback_reason = ""
+            # Renderer metadata must describe the selected/effective pass,
+            # never a prior indexed frame after switching back to OpenUA.
+            self._last_indexed_stats = {}
+            if mode == "textured_indexed":
+                self._indexed_runtime_error = ""
+            # Fewer animation wakeups avoid queuing redundant indexed frames.
+            # Animation time itself is measured from a monotonic clock.
+            self._anim_timer.setInterval(
+                33 if mode == "textured_indexed" else 16)
+            if mode == "textured_indexed":
+                if self._indexed_adapter is not None:
+                    self.statusMessage.emit(
+                        "Retail indexed renderer active (reconstructed "
+                        "SHADERMP/TRACYRMP path).")
+                else:
+                    self.statusMessage.emit(
+                        "Retail indexed renderer unavailable; using OpenUA "
+                        f"preview fallback: {self._indexed_unavailable_reason}")
             self.update()
+
+    @property
+    def view_mode(self) -> str:
+        """Currently selected display mode, including snapshot overrides."""
+
+        return self._mode
+
+    @property
+    def indexed_rendering_available(self) -> bool:
+        return bool(
+            self._indexed_adapter is not None
+            and not self._indexed_runtime_error
+        )
+
+    @property
+    def indexed_rendering_reason(self) -> str:
+        return self._indexed_runtime_error or self._indexed_unavailable_reason
+
+    @property
+    def indexed_renderer_info(self) -> dict:
+        resources_available = self._indexed_adapter is not None
+        requested = (
+            self._mode
+            if self._last_render_requested_mode == "not_rendered"
+            else self._last_render_requested_mode
+        )
+        fallback_used = self._last_effective_renderer == (
+            "openua_preview_fallback")
+        info = {
+            "available": bool(resources_available and not self._indexed_runtime_error),
+            "resources_available": resources_available,
+            "mode": "retail_indexed_reconstructed",
+            "requested_mode": requested,
+            "effective_mode": self._last_effective_renderer,
+            "fallback_used": fallback_used,
+            "fallback_reason": self._last_render_fallback_reason,
+            "reason": self.indexed_rendering_reason if not resources_available
+            or self._indexed_runtime_error else "",
+            "acceleration_backend": IndexedRasterizer.acceleration_backend,
+            "max_safe_pixels": IndexedRasterizer.max_safe_pixels,
+            "background_mode": self._last_render_background,
+            "last_render_stats": dict(self._last_indexed_stats),
+        }
+        if self._indexed_adapter is not None:
+            info["sources"] = dict(self._indexed_adapter.source_info)
+        return info
 
     def set_show_sen(self, enabled: bool) -> None:
         self._show_sen = enabled
@@ -2631,7 +2739,8 @@ class AssetViewport(QWidget):
         self._snapshot_show_guides = False
         self._snapshot_background = (QColor(background)
                                      if background is not None else None)
-        self._mode = "textured"
+        if self._mode not in TEXTURED_VIEW_MODES:
+            self._mode = "textured"
         self._show_sen = False
         self._show_axes = False
         self._show_grid = False
@@ -2648,6 +2757,8 @@ class AssetViewport(QWidget):
         if state is not None:
             self._set_camera_state(state["camera"])
             self._mode = state["mode"]
+            self._anim_timer.setInterval(
+                33 if self._mode == "textured_indexed" else 16)
             self._show_sen = state["show_sen"]
             self._show_axes = state["show_axes"]
             self._show_grid = state["show_grid"]
@@ -2655,6 +2766,14 @@ class AssetViewport(QWidget):
             self._show_owner_bbox = state["show_owner_bbox"]
             self._mapping_diagnostics = state["mapping_diagnostics"]
             self._show_diag_overlay = state["show_diag_overlay"]
+        # The snapshot's renderer/hash metadata describes the temporary
+        # camera and mode, not the restored workspace.  Leave no stale exact
+        # claim visible while the normal viewport awaits its next repaint.
+        self._last_render_requested_mode = "not_rendered"
+        self._last_effective_renderer = "not_rendered"
+        self._last_render_fallback_reason = ""
+        self._last_render_background = "not_rendered"
+        self._last_indexed_stats = {}
         self._snapshot_active = False
         self._snapshot_show_guides = False
         self._snapshot_background = None
@@ -2761,18 +2880,58 @@ class AssetViewport(QWidget):
 
         width = int(target_size.width())
         height = int(target_size.height())
+        # Start a new metadata transaction before every early return and
+        # preflight.  A failed attempt must never expose the exact hash or
+        # effective renderer from the preceding successful snapshot.
+        self._last_render_requested_mode = self._mode
+        self._last_effective_renderer = "not_rendered"
+        self._last_render_fallback_reason = ""
+        self._last_render_background = "not_rendered"
+        self._last_indexed_stats = {}
         if not self._faces or width <= 0 or height <= 0:
             return QImage()
+        if self._mode == "textured_indexed":
+            try:
+                self._validate_indexed_pixel_budget(width, height)
+            except RuntimeError as exc:
+                self._last_render_fallback_reason = str(exc)
+                raise
         image = QImage(width, height,
                        QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         painter = QPainter(image)
-        self._render_scene(painter, QRectF(0, 0, width, height), background,
-                           clean=not include_guides,
-                           camera=self._camera_state(),
-                           allow_transparent_background=True)
-        painter.end()
+        try:
+            self._render_scene(
+                painter, QRectF(0, 0, width, height), background,
+                clean=not include_guides,
+                camera=self._camera_state(),
+                allow_transparent_background=True,
+            )
+        finally:
+            painter.end()
+        if self._mode == "textured_indexed" \
+                and self._last_effective_renderer \
+                != "retail_indexed_reconstructed":
+            reason = (
+                self._last_render_fallback_reason
+                or self.indexed_rendering_reason
+                or "the indexed pass did not complete"
+            )
+            raise RuntimeError(
+                "Retail indexed snapshot aborted instead of exporting an "
+                f"OpenUA fallback: {reason}")
         return image
+
+    @staticmethod
+    def _validate_indexed_pixel_budget(width: int, height: int) -> None:
+        requested_pixels = width * height
+        if requested_pixels <= IndexedRasterizer.max_safe_pixels:
+            return
+        maximum = IndexedRasterizer.max_safe_pixels
+        raise RuntimeError(
+            f"{width} x {height} indexed render ({requested_pixels:,} "
+            f"pixels) exceeds the {IndexedRasterizer.acceleration_backend} "
+            f"backend safety budget of {maximum:,} pixels")
 
     def reset_view(self) -> None:
         self._yaw = self.RESET_YAW
@@ -2791,9 +2950,11 @@ class AssetViewport(QWidget):
     def play_animation(self, playing: bool) -> None:
         self._anim_playing = playing and self.has_animation
         if self._anim_playing:
+            self._anim_last_tick = time.perf_counter()
             self._anim_timer.start()
         else:
             self._anim_timer.stop()
+            self._anim_last_tick = None
         self.update()
 
     def stop_animation(self) -> None:
@@ -2817,6 +2978,29 @@ class AssetViewport(QWidget):
 
     def reset_animation(self) -> None:
         self._reset_animation_states()
+        self.update()
+        self.animationFrameChanged.emit(self.current_frame_text())
+
+    def set_animation_time_ms(self, elapsed_ms: float) -> None:
+        """Resolve every VANM material deterministically at one elapsed time.
+
+        Frame durations are authored in the game's 1024 Hz clock.  This method
+        is shared by reproducible snapshots and local canonical regression
+        tests; it does not start playback or modify the source animation.
+        """
+
+        elapsed = float(elapsed_ms)
+        if not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError("animation time must be a finite non-negative value")
+        self._reset_animation_states()
+        for material_id, material in enumerate(self._materials):
+            if not material.anim_frames:
+                continue
+            frame, direction, remaining, _changed = (
+                self._resolve_animation_elapsed(
+                    material, 0, 1, elapsed))
+            self._anim_states[material_id] = (frame, direction)
+            self._anim_left_ms[material_id] = remaining
         self.update()
         self.animationFrameChanged.emit(self.current_frame_text())
 
@@ -2899,6 +3083,8 @@ class AssetViewport(QWidget):
         self._anim_states = {}
         self._anim_left_ms = {}
         self._anim_clock_ms = 0.0
+        self._anim_last_tick = (
+            time.perf_counter() if self._anim_playing else None)
         for mat_id, mat in enumerate(self._materials):
             if mat.anim_frames:
                 self._anim_states[mat_id] = (0, 1)
@@ -2919,24 +3105,87 @@ class AssetViewport(QWidget):
             direction = 1
         return frame, direction
 
+    def _resolve_animation_elapsed(
+            self, mat: ViewMaterial, frame: int, direction: int,
+            elapsed_ms: float) -> tuple[int, int, float, bool]:
+        """Advance one VANM state in time bounded by its authored cycle.
+
+        The former per-frame loop scaled with wall-clock gaps: resuming after a
+        debugger pause could execute millions of transitions on the GUI
+        thread.  Loop animations repeat after ``N`` states and the engine's
+        endpoint-holding ping-pong sequence repeats after ``2N`` states, so a
+        complete cycle can be measured once and skipped with a modulo.
+        """
+
+        if not mat.anim_frames:
+            return frame, direction, float(elapsed_ms), False
+        if not (0 <= frame < len(mat.anim_frames)):
+            raise RuntimeError("animation frame state is outside its frame table")
+
+        start = (int(frame), int(direction))
+        states: list[tuple[int, int]] = []
+        durations: list[float] = []
+        cursor = start
+        # Valid loop and ping-pong states return to the same (frame,
+        # direction) in at most 2N transitions.  The small cushion also
+        # handles a one-frame animation without special casing it.
+        for _step in range(max(2, len(mat.anim_frames) * 2 + 2)):
+            states.append(cursor)
+            duration = (
+                mat.anim_frames[cursor[0]][0] * 1000.0 / 1024.0)
+            durations.append(duration)
+            cursor = self._next_frame(mat, cursor[0], cursor[1])
+            if cursor == start:
+                break
+        else:
+            raise RuntimeError("animation state did not form a bounded cycle")
+
+        remaining = max(0.0, float(elapsed_ms))
+        changed = False
+        # A zero/negative authored duration froze the previous implementation
+        # at that frame.  Preserve that behavior without attempting modulo by
+        # a non-positive cycle.
+        if any(duration <= 0.0 for duration in durations):
+            for state, duration in zip(states, durations):
+                if duration <= 0.0 or remaining < duration:
+                    return state[0], state[1], remaining, changed
+                remaining -= duration
+                changed = True
+            raise RuntimeError("animation zero-duration cycle was not resolved")
+
+        cycle_ms = sum(durations)
+        if remaining >= cycle_ms:
+            remaining = math.fmod(remaining, cycle_ms)
+            changed = True
+        for state, duration in zip(states, durations):
+            if remaining < duration:
+                return state[0], state[1], remaining, changed
+            remaining -= duration
+            changed = True
+        # Floating-point roundoff at an exact cycle boundary means the state
+        # is precisely back at the authored start.
+        return start[0], start[1], 0.0, changed
+
     def _advance_animation(self) -> None:
         if not self._anim_playing:
             return
-        delta_ms = self._anim_timer.interval() * self._anim_speed
+        now = time.perf_counter()
+        if self._anim_last_tick is None:
+            elapsed_ms = float(self._anim_timer.interval())
+        else:
+            elapsed_ms = max(0.0, (now - self._anim_last_tick) * 1000.0)
+        self._anim_last_tick = now
+        delta_ms = elapsed_ms * self._anim_speed
         changed = False
         for mat_id, mat in enumerate(self._materials):
             if not mat.anim_frames:
                 continue
             frame, direction = self._anim_states.get(mat_id, (0, 1))
             left = self._anim_left_ms.get(mat_id, 0.0) + delta_ms
-            # frame_time is in 1024 Hz game ticks (CONFIRMED)
-            while True:
-                duration_ms = mat.anim_frames[frame][0] * 1000.0 / 1024.0
-                if left < duration_ms or duration_ms <= 0:
-                    break
-                left -= duration_ms
-                frame, direction = self._next_frame(mat, frame, direction)
-                changed = True
+            frame, direction, left, material_changed = (
+                self._resolve_animation_elapsed(
+                    mat, frame, direction, left))
+            changed = changed or material_changed
             self._anim_states[mat_id] = (frame, direction)
             self._anim_left_ms[mat_id] = left
         if changed:
@@ -2994,6 +3243,94 @@ class AssetViewport(QWidget):
                            camera=self._camera_state())
         painter.end()
 
+    def _render_indexed_model(
+            self, ordered: list[CameraPolygon], target: QRectF,
+            camera: dict) -> QImage:
+        """Rasterize one already-BSP-ordered model pass in palette space.
+
+        The returned image is transparent outside authored model/effect
+        coverage.  This lets the normal viewer background, grid, and axes stay
+        beneath the model while selection and editor overlays are drawn later.
+        """
+
+        adapter = self._indexed_adapter
+        if adapter is None:
+            raise RuntimeError(self._indexed_unavailable_reason)
+        unmapped = [face for face in self._faces if not face.mapped]
+        if unmapped:
+            examples = ", ".join(
+                f"{face.owner} polygon {face.poly_id}"
+                for face in unmapped[:4])
+            more = (
+                f" (+{len(unmapped) - 4} more)"
+                if len(unmapped) > 4 else "")
+            raise RuntimeError(
+                "retail indexed rendering requires complete ATTS material "
+                f"mappings; found {len(unmapped)} unmapped polygon(s): "
+                f"{examples}{more}")
+        width = int(round(target.width()))
+        height = int(round(target.height()))
+        if width <= 0 or height <= 0:
+            return QImage()
+        self._validate_indexed_pixel_budget(width, height)
+
+        origin_x = float(target.left())
+        origin_y = float(target.top())
+        indexed_pieces: list[IndexedPiece] = []
+        for piece in ordered:
+            payload = piece.payload
+            face = payload.face
+            material = self._materials[face.material]
+            frame_index, _direction = self._anim_states.get(
+                face.material, (0, 1))
+            surface = adapter.resolve_surface(
+                face, material, frame_index)
+            if surface.kind == "texture" and not payload.uv_mapping_valid:
+                raise RuntimeError(
+                    "indexed texture mapping is incomplete for "
+                    f"{face.owner} polygon {face.poly_id} "
+                    f"(block {face.block_index})")
+            screen = tuple(
+                (
+                    float(point.x()) - origin_x,
+                    float(point.y()) - origin_y,
+                )
+                for point in (
+                    self._project(vertex, target, camera)
+                    for vertex in piece.vertices
+                )
+            )
+            indexed_pieces.append(IndexedPiece(
+                source_face_id=id(face),
+                polygon_id=int(face.poly_id),
+                screen=screen,
+                uvs=tuple(
+                    (float(uv[0]), float(uv[1]))
+                    for uv in piece.attributes
+                ),
+                camera_vertices=tuple(
+                    tuple(float(value) for value in vertex)
+                    for vertex in piece.vertices
+                ),
+                surface=surface,
+            ))
+
+        result = IndexedRasterizer.render(
+            width, height, indexed_pieces, adapter.tables,
+            background_index=0)
+        rgba = result.to_rgba(
+            adapter.tables, transparent_background=True)
+        image = QImage(
+            rgba,
+            width,
+            height,
+            width * 4,
+            QImage.Format.Format_RGBA8888,
+        ).copy()
+        self._last_indexed_stats = dict(result.stats)
+        self._indexed_runtime_error = ""
+        return image
+
     def _render_scene(self, painter: QPainter, target: QRectF,
                       background: QColor | None, clean: bool,
                       camera: dict,
@@ -3027,7 +3364,28 @@ class AssetViewport(QWidget):
         if self._show_axes and not clean:
             self._draw_axes(painter, target, camera)
 
-        mode = "textured" if clean else self._mode
+        mode = self._mode if clean and self._mode in TEXTURED_VIEW_MODES \
+            else ("textured" if clean else self._mode)
+        self._last_render_requested_mode = mode
+        if mode != "textured_indexed":
+            self._last_indexed_stats = {}
+        if background is None:
+            self._last_render_background = "transparent_or_viewer_default"
+        elif QColor(background) == QColor(0, 0, 0):
+            self._last_render_background = "palette_index_0_black"
+        else:
+            self._last_render_background = (
+                "rgb_post_composite_over_palette_index_0")
+        if mode == "textured_indexed":
+            self._last_effective_renderer = "openua_preview_fallback"
+            self._last_render_fallback_reason = (
+                self._indexed_unavailable_reason
+                if self._indexed_adapter is None else "indexed pass pending"
+            )
+        else:
+            self._last_effective_renderer = (
+                "openua_preview" if mode == "textured" else mode)
+            self._last_render_fallback_reason = ""
         pick_shapes = []
         selected_shape = None
         source_polygons: dict[int, QPolygonF] = {}
@@ -3035,20 +3393,21 @@ class AssetViewport(QWidget):
         highlight_paths: dict[int, QPainterPath] = {}
         def draw_piece(face: ViewFace, piece_camera, piece_uvs,
                        image: QImage | None,
-                       front_facing: bool) -> None:
+                       front_facing: bool,
+                       draw_model: bool = True) -> None:
             screen = [
                 self._project(point, target, camera)
                 for point in piece_camera
             ]
             polygon = QPolygonF(screen)
-            if not face.mapped and not clean:
+            if draw_model and not face.mapped and not clean:
                 # ATTS coverage holes are only a diagnostic aid.  Keep them
                 # visible without letting legacy unmapped faces dominate the
                 # textured model preview.
                 painter.setPen(QPen(QColor(155, 160, 170, 115), 1.0))
                 painter.setBrush(QColor(105, 110, 120, 48))
                 painter.drawPolygon(polygon)
-            else:
+            elif draw_model:
                 self._draw_face(painter, face, screen, mode=mode,
                                 draw_wire=False,
                                 camera_vertices=piece_camera,
@@ -3071,7 +3430,7 @@ class AssetViewport(QWidget):
                 not clean
                 and self._selected_owner is not None
                 and face.owner == self._selected_owner
-                and (self._mode != "textured"
+                and (self._mode not in TEXTURED_VIEW_MODES
                      or whole_edit_owner_selected))
             if poly_highlighted or owner_highlighted:
                 highlight_color = (
@@ -3170,9 +3529,11 @@ class AssetViewport(QWidget):
                 mat = self._materials[face.material]
                 image = None
                 face_uvs = []
-                if mode == "textured" and face.mapped:
+                uv_mapping_valid = self._source_uv_mapping_valid(face, mat)
+                if mode in TEXTURED_VIEW_MODES and face.mapped:
                     image, face_uvs = self._face_texture(face, mat)
                 if len(face_uvs) != len(cam):
+                    uv_mapping_valid = False
                     face_uvs = [(0.0, 0.0)] * len(cam)
                     image = None
                 for index in range(2, len(cam)):
@@ -3205,13 +3566,15 @@ class AssetViewport(QWidget):
                     triangles.append(CameraPolygon(
                         clipped.vertices,
                         clipped.attributes,
-                        _RenderPayload(face, image, front_facing),
+                        _RenderPayload(
+                            face, image, front_facing, uv_mapping_valid),
                         source_order,
                     ))
                     source_order += 1
 
             interactive_render = (
                 not clean
+                and mode != "textured_indexed"
                 and (
                     self._camera_interacting
                     or self._anim_playing
@@ -3223,12 +3586,43 @@ class AssetViewport(QWidget):
                 order_camera_polygons_fast(triangles)
                 if interactive_render
                 else order_camera_polygons(triangles))
+            indexed_active = False
+            if mode == "textured_indexed" \
+                    and self._indexed_adapter is not None:
+                previous_error = self._indexed_runtime_error
+                try:
+                    indexed_image = self._render_indexed_model(
+                        ordered, target, camera)
+                except Exception as exc:
+                    self._indexed_runtime_error = str(exc)
+                    self._last_indexed_stats = {}
+                    self._last_effective_renderer = "openua_preview_fallback"
+                    self._last_render_fallback_reason = str(exc)
+                    if self._indexed_runtime_error != previous_error:
+                        self.statusMessage.emit(
+                            "Retail indexed pass failed; interactive OpenUA "
+                            f"fallback only: {exc}")
+                else:
+                    if not indexed_image.isNull():
+                        painter.drawImage(target.topLeft(), indexed_image)
+                        indexed_active = True
+                        self._last_effective_renderer = (
+                            "retail_indexed_reconstructed")
+                        self._last_render_fallback_reason = ""
+                    else:
+                        self._last_effective_renderer = (
+                            "openua_preview_fallback")
+                        self._last_render_fallback_reason = (
+                            "indexed pass returned a null image")
             for piece in ordered:
                 payload = piece.payload
                 draw_piece(
                     payload.face, piece.vertices,
                     piece.attributes, payload.image,
-                    payload.front_facing)
+                    payload.front_facing,
+                    draw_model=(not indexed_active
+                                or (not clean
+                                    and not payload.face.mapped)))
 
         if not clean and highlight_paths:
             painter.setPen(QPen(QColor(90, 230, 255), 1.2))
@@ -3301,7 +3695,12 @@ class AssetViewport(QWidget):
         if not clean and self._show_sen:
             self._draw_sen(painter, target, camera)
 
-        if not clean and self._mode == "textured" and self._diagnostics \
+        indexed_diagnostic = bool(
+            self._mode == "textured_indexed"
+            and (self._indexed_adapter is None
+                 or self._indexed_runtime_error))
+        if not clean and self._mode in TEXTURED_VIEW_MODES \
+                and (self._diagnostics or indexed_diagnostic) \
                 and self._show_diag_overlay:
             self._draw_diagnostics_overlay(painter)
 
@@ -3594,10 +3993,19 @@ class AssetViewport(QWidget):
     def _draw_diagnostics_overlay(self, painter: QPainter) -> None:
         # Compact badge: first two issues only; the full list lives in the
         # bottom Warnings panel (View menu can hide this overlay entirely).
-        lines = [f"Preview issues ({len(self._diagnostics)}):"]
-        lines.extend(f"- {d[:80]}" for d in self._diagnostics[:2])
-        if len(self._diagnostics) > 2:
-            lines.append(f"... +{len(self._diagnostics) - 2} more "
+        diagnostics = list(self._diagnostics)
+        if self._mode == "textured_indexed":
+            reason = (
+                self._indexed_runtime_error
+                or (self._indexed_unavailable_reason
+                    if self._indexed_adapter is None else ""))
+            if reason:
+                diagnostics.append(
+                    "Retail indexed fallback to OpenUA preview: " + reason)
+        lines = [f"Preview issues ({len(diagnostics)}):"]
+        lines.extend(f"- {d[:80]}" for d in diagnostics[:2])
+        if len(diagnostics) > 2:
+            lines.append(f"... +{len(diagnostics) - 2} more "
                          "(see Warnings)")
         metrics = painter.fontMetrics()
         width = max(metrics.horizontalAdvance(line) for line in lines) + 16
@@ -3684,6 +4092,22 @@ class AssetViewport(QWidget):
                    for j in range(len(face.vertices))]
             return image, uvs
         return mat.image, face.uvs
+
+    def _source_uv_mapping_valid(
+            self, face: ViewFace, mat: ViewMaterial) -> bool:
+        """Return whether authored UV data covers every source-face vertex."""
+
+        if mat.anim_frames:
+            frame_index, _direction = self._anim_states.get(
+                face.material, (0, 1))
+            if not 0 <= frame_index < len(mat.anim_frames):
+                return False
+            _duration, _image_id, uv_id = mat.anim_frames[frame_index]
+            return bool(
+                0 <= uv_id < len(mat.anim_uv_groups)
+                and len(mat.anim_uv_groups[uv_id]) == len(face.vertices)
+            )
+        return len(face.uvs) == len(face.vertices)
 
     def _draw_textured(self, painter: QPainter, screen: list[QPointF],
                        uvs: list[tuple[int, int]], image: QImage,

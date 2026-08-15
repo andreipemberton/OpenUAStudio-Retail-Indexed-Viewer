@@ -1,0 +1,6 @@
+# PySide6 provides the existing OpenUAStudio viewer and Snapshot Studio UI.
+PySide6>=6.8,<7
+
+# Optional in the backend, but strongly recommended for interactive and 4K
+# indexed rendering.  A deterministic pure-Python fallback remains available.
+numpy>=1.26

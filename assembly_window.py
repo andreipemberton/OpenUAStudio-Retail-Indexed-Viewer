@@ -80,7 +80,12 @@ from asset_family import (
 )
 from anm_parser import AnmParseError, export_anm_bytes, parse_anm_bytes
 from asset_tree_filter import filter_tree as filter_asset_tree
-from assembly_viewer import AssetViewport, VIEW_MODES, VIEW_PRESETS
+from assembly_viewer import (
+    AssetViewport,
+    TEXTURED_VIEW_MODES,
+    VIEW_MODES,
+    VIEW_PRESETS,
+)
 from base_mapping_editor import (
     MappingEditError,
     MappingIndex,
@@ -1229,7 +1234,9 @@ class AssemblyWindow(QMainWindow):
                      if candidate != "solid"):
             label = {"wireframe": "Wireframe",
                      "materials": "Material groups",
-                     "textured": "Textured"}[mode]
+                     "textured": "Textured — OpenUA preview",
+                     "textured_indexed":
+                         "Textured — Retail indexed (reconstructed)"}[mode]
             self.mode_combo.addItem(label, mode)
         self.mode_combo.setCurrentIndex(
             self.mode_combo.findData("textured"))
@@ -1731,14 +1738,23 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_view_combo.currentTextChanged.connect(
             self._on_snapshot_preset_changed)
         view_layout.addWidget(self.snapshot_view_combo, 0, 0, 1, 2)
-        view_layout.addWidget(QLabel("Zoom:"), 1, 0)
+        view_layout.addWidget(QLabel("Renderer:"), 1, 0)
+        self.snapshot_renderer_combo = QComboBox()
+        self.snapshot_renderer_combo.addItem(
+            "OpenUA preview", "textured")
+        self.snapshot_renderer_combo.addItem(
+            "Retail indexed (reconstructed)", "textured_indexed")
+        self.snapshot_renderer_combo.currentIndexChanged.connect(
+            self._on_snapshot_renderer_changed)
+        view_layout.addWidget(self.snapshot_renderer_combo, 1, 1)
+        view_layout.addWidget(QLabel("Zoom:"), 2, 0)
         self.snapshot_zoom_spin = QSpinBox()
         self.snapshot_zoom_spin.setRange(25, 300)
         self.snapshot_zoom_spin.setSuffix("%")
         self.snapshot_zoom_spin.setValue(100)
         self.snapshot_zoom_spin.valueChanged.connect(
             self._on_snapshot_zoom_changed)
-        view_layout.addWidget(self.snapshot_zoom_spin, 1, 1)
+        view_layout.addWidget(self.snapshot_zoom_spin, 2, 1)
         self.snapshot_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.snapshot_zoom_slider.setRange(25, 300)
         self.snapshot_zoom_slider.setValue(100)
@@ -1746,13 +1762,13 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_zoom_slider.setPageStep(10)
         self.snapshot_zoom_slider.valueChanged.connect(
             self._on_snapshot_zoom_changed)
-        view_layout.addWidget(self.snapshot_zoom_slider, 2, 0, 1, 2)
+        view_layout.addWidget(self.snapshot_zoom_slider, 3, 0, 1, 2)
         self.snapshot_guides_button = QPushButton("Show Guides and Overlays")
         self.snapshot_guides_button.setCheckable(True)
         self.snapshot_guides_button.setChecked(False)
         self.snapshot_guides_button.toggled.connect(
             self._on_snapshot_guides_toggled)
-        view_layout.addWidget(self.snapshot_guides_button, 3, 0, 1, 2)
+        view_layout.addWidget(self.snapshot_guides_button, 4, 0, 1, 2)
         studio_layout.addWidget(view_box)
 
         background_box = QGroupBox("Background")
@@ -1761,8 +1777,11 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_color_button = QPushButton("None")
         self.snapshot_color_button.setFixedSize(64, 26)
         self.snapshot_color_button.setToolTip(
-            "No color selected: preview uses the normal dark background and export is transparent.\n"
-            "Click to choose a custom background color.")
+            "No color selected: preview uses the normal dark background and "
+            "export is transparent.\nClick to choose a custom background "
+            "color. In Retail indexed mode, a non-black RGB color is a "
+            "presentation post-composite; TRACY is evaluated against palette "
+            "index 0 before the color is applied.")
         self.snapshot_color_button.clicked.connect(
             self._choose_snapshot_color)
         background_layout.addWidget(self.snapshot_color_button, 0, 1)
@@ -4079,9 +4098,35 @@ class AssemblyWindow(QMainWindow):
     def _on_view_mode_changed(self, _index: int) -> None:
         mode = self.mode_combo.currentData()
         self.viewport.set_mode(mode)
-        self._notify(
-            f"Viewport mode changed to {self.mode_combo.currentText()}.",
-            3500)
+        if mode in TEXTURED_VIEW_MODES:
+            renderer_index = self.snapshot_renderer_combo.findData(mode)
+            if renderer_index >= 0:
+                self.snapshot_renderer_combo.blockSignals(True)
+                self.snapshot_renderer_combo.setCurrentIndex(renderer_index)
+                self.snapshot_renderer_combo.blockSignals(False)
+        if mode != "textured_indexed":
+            self._notify(
+                f"Viewport mode changed to {self.mode_combo.currentText()}.",
+                3500)
+
+    def _on_snapshot_renderer_changed(self, _index: int) -> None:
+        """Select the model renderer used by preview and snapshot exports."""
+
+        mode = self.snapshot_renderer_combo.currentData()
+        if mode not in TEXTURED_VIEW_MODES:
+            return
+        self.viewport.set_mode(mode)
+        toolbar_index = self.mode_combo.findData(mode)
+        if toolbar_index >= 0:
+            self.mode_combo.blockSignals(True)
+            self.mode_combo.setCurrentIndex(toolbar_index)
+            self.mode_combo.blockSignals(False)
+        if mode != "textured_indexed":
+            self._notify(
+                f"Snapshot renderer changed to "
+                f"{self.snapshot_renderer_combo.currentText()}.",
+                5000,
+            )
 
     def _sync_animation_controls(self) -> None:
         """Match controls and playback to the rendered selected subtree.
@@ -4267,6 +4312,12 @@ class AssemblyWindow(QMainWindow):
         if entering and not self._snapshot_mode_active:
             self._snapshot_mode_active = True
             self.viewport.begin_snapshot_mode(self._snapshot_background())
+            renderer_index = self.snapshot_renderer_combo.findData(
+                self.viewport.view_mode)
+            if renderer_index >= 0:
+                self.snapshot_renderer_combo.blockSignals(True)
+                self.snapshot_renderer_combo.setCurrentIndex(renderer_index)
+                self.snapshot_renderer_combo.blockSignals(False)
             self._snapshot_zoom_percent = 100
             for widget in (self.snapshot_zoom_spin,
                            self.snapshot_zoom_slider):
@@ -4277,7 +4328,7 @@ class AssemblyWindow(QMainWindow):
             self.viewport.set_snapshot_guides_visible(False)
             self.mode_combo.blockSignals(True)
             self.mode_combo.setCurrentIndex(
-                self.mode_combo.findData("textured"))
+                self.mode_combo.findData(self.viewport.view_mode))
             self.mode_combo.blockSignals(False)
             self.mode_combo.setEnabled(False)
             self.edit_toggle_action.setEnabled(False)
@@ -4297,6 +4348,16 @@ class AssemblyWindow(QMainWindow):
                 self.mode_combo.blockSignals(True)
                 self.mode_combo.setCurrentIndex(restored_index)
                 self.mode_combo.blockSignals(False)
+            restored_renderer = (
+                restored_mode
+                if restored_mode in TEXTURED_VIEW_MODES else "textured"
+            )
+            renderer_index = self.snapshot_renderer_combo.findData(
+                restored_renderer)
+            if renderer_index >= 0:
+                self.snapshot_renderer_combo.blockSignals(True)
+                self.snapshot_renderer_combo.setCurrentIndex(renderer_index)
+                self.snapshot_renderer_combo.blockSignals(False)
             self.mode_combo.setEnabled(True)
             self.edit_toggle_action.setEnabled(True)
             self.toolbar_view_preset_combo.setEnabled(True)
@@ -4541,9 +4602,17 @@ class AssemblyWindow(QMainWindow):
         background = self._snapshot_background()
         if image_format == "jpg" and background is None:
             background = QColor(96, 96, 96)
-        image = self.viewport.render_snapshot(
-            self._snapshot_output_size(), background,
-            include_guides=self.snapshot_guides_button.isChecked())
+        try:
+            image = self.viewport.render_snapshot(
+                self._snapshot_output_size(), background,
+                include_guides=self.snapshot_guides_button.isChecked())
+        except RuntimeError as exc:
+            QMessageBox.warning(
+                self,
+                "Retail indexed export aborted",
+                str(exc),
+            )
+            return
         if image.isNull():
             QMessageBox.warning(self, "Export failed",
                                 "The snapshot image could not be rendered.")

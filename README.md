@@ -27,6 +27,73 @@ Suite, Map Editor, Collision Editor, or Wireframe Editor.
 
 A precompiled Windows executable may also be included in the repository for convenience.
 
+### Viewer-only launch
+
+The viewer-focused entry point opens the read-only Snapshot Studio directly,
+without the multi-tool selector:
+
+```bash
+python -m pip install -r requirements-viewer.txt
+python viewer_main.py [path/to/asset.base-or-SET.BAS]
+```
+
+The complete upstream source tree is intentionally retained. Snapshot Studio
+shares its parsers and presentation code with the main suite, and preserving
+the tree also keeps the upstream GPL history and provenance clear.
+
+### Reconstructed retail-indexed renderer
+
+The normal **Textured - OpenUA preview** renderer remains the default. A
+second explicit choice, **Textured - Retail indexed (reconstructed)**, is
+available in the model-view mode control and in Snapshot Studio's **Renderer**
+control. Snapshot exports and complete-model batch exports honor the selected
+renderer. Batch manifests record the requested and effective renderer for each
+image, fallback reasons, source-table hashes, and exact index-buffer hashes.
+`run_info.json` summarizes those per-image records without treating an old
+file retained by **Skip existing** as a newly verified indexed render.
+
+The reconstructed mode keeps source texture and framebuffer pixels as palette
+indices until final display. It applies the local game's `SHADERMP` lookup,
+rejects source-palette yellow chroma before remapping, and composites flat
+TRACY effects through the local `TRACYRMP` table. Nearest-neighbor indexed
+sampling is retained for transparent effect cards. This fixes important cases
+that ordinary RGB filtering and additive blending cannot represent, including
+Taerkasten Hauptstation lightning and the distinct clear-TRACY and flat-TRACY
+propeller systems.
+
+See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
+fail-closed export rules, current limits, and reproducible test commands.
+
+The mode requires a lawfully obtained local game data set containing a
+256-entry palette plus matching `REMAP/SHADERMP.ILB` (or `.ILBM`) and
+`REMAP/TRACYRMP.ILB` (or `.ILBM`) files. OpenUAStudio reads those files but
+does not modify or distribute them. NumPy is strongly recommended for this
+mode; the deterministic pure-Python fallback is intended for compatibility,
+not high-resolution interactive use.
+
+This is a source-derived reconstruction of the retail indexed-color pipeline,
+not a claim of cycle-accurate emulation. It is deliberately labeled
+"reconstructed" in the interface. Unknown or unsupported indexed material
+combinations fail visibly. The interactive viewport may show the existing
+OpenUA preview as an explicitly reported fallback, but manual and batch
+exports fail closed instead of silently saving that fallback as an indexed
+result.
+
+Exact mode also refuses an ambiguous palette/SET origin when candidate SETs
+carry different remap-table hashes. Duplicate candidates are accepted only
+when their complete palette, SHADERMP, and TRACYRMP profiles are byte-identical.
+The current profile gates cover the main inspected Urban Assault SET tables;
+an unrelated remap family that does not satisfy those structural invariants is
+reported as unsupported rather than guessed.
+
+For memory safety, NumPy-accelerated indexed exports are limited to 16,777,216
+pixels (a square 4096 x 4096 frame). The portable Python backend is limited to
+1,048,576 pixels. The normal OpenUA preview retains its existing output-size
+range. In exact mode, transparent or black output corresponds to destination
+palette index 0. A custom non-black RGB background is intentionally a
+presentation post-composite and does not become the destination of TRACY table
+lookups; the UI identifies this in the background control tooltip.
+
 ## License
 
 Copyright (C) 2025-2026 TeuZzZ-17

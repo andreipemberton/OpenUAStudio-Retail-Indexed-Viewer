@@ -8,13 +8,14 @@ that is not present in the VISPROTO table. Source assets remain read-only.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
 import time
 import zipfile
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from PySide6.QtCore import QSize, QTimer
 from PySide6.QtGui import QImageWriter
@@ -34,7 +35,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from assembly_viewer import AssetViewport, VIEW_PRESET_ANGLES
+from assembly_viewer import (
+    AssetViewport,
+    TEXTURED_VIEW_MODES,
+    VIEW_PRESET_ANGLES,
+)
 from asset_family import AssetFamily, FamilyObject, load_asset_family
 from base_parser import BaseObject
 from setbas_reader import decode_skeleton
@@ -42,6 +47,17 @@ from vp_manager import normalize_base_name, normalize_skeleton_name
 
 
 _INVALID_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
+_ZIP_METADATA_FILES = (
+    "manifest.json",
+    "manifest.csv",
+    "warnings.log",
+    "run_info.json",
+)
+_ZIP_IMAGE_STATUSES = {
+    "WRITTEN",
+    "EXISTS",
+    "ERROR_EXISTING_RETAINED",
+}
 
 
 @dataclass
@@ -77,6 +93,14 @@ class BatchManifestRow:
     relative_file: str
     status: str
     message: str
+    requested_renderer: str
+    effective_renderer: str
+    fallback_used: bool
+    fallback_reason: str
+    palette_sha256: str
+    shadermp_sha256: str
+    tracyrmp_sha256: str
+    index_buffer_sha256: str
 
 
 def safe_component(value: str, fallback: str = "unnamed",
@@ -100,6 +124,17 @@ def drawable_polygon_count(skeleton) -> int:
     if skeleton is None:
         return 0
     return sum(1 for polygon in skeleton.polygons if len(polygon) >= 3)
+
+
+def file_sha256(path: str | Path) -> str:
+    source = Path(path)
+    if not source.is_file():
+        return ""
+    digest = hashlib.sha256()
+    with source.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class VPSnapshotBatchPanel(QGroupBox):
@@ -128,6 +163,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._failed = 0
         self._started_at = 0.0
         self._last_setbas_path = ""
+        self._renderer_mode = "textured"
         self._batch_viewport: AssetViewport | None = None
         self._active_source_key: tuple[str, int] | None = None
 
@@ -324,6 +360,13 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._root.mkdir(parents=True, exist_ok=True)
         self._target_size = self.window._snapshot_output_size()
         self._zoom = int(self.window.snapshot_zoom_spin.value())
+        renderer_combo = getattr(
+            self.window, "snapshot_renderer_combo", None)
+        self._renderer_mode = (
+            renderer_combo.currentData()
+            if renderer_combo is not None else "textured")
+        if self._renderer_mode not in TEXTURED_VIEW_MODES:
+            self._renderer_mode = "textured"
 
         self._set_running(True)
         self.status_label.setText("Scanning SET.BAS...")
@@ -397,6 +440,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.progress.setValue(0)
 
         self._batch_viewport = AssetViewport(self)
+        self._batch_viewport.set_mode(self._renderer_mode)
         self._batch_viewport.begin_snapshot_mode(None)
         self._batch_viewport.play_animation(False)
         self._batch_viewport.set_snapshot_guides_visible(False)
@@ -615,6 +659,7 @@ class VPSnapshotBatchPanel(QGroupBox):
                 self._family,
                 visible_owners=self._family_descendants(owner),
                 primary_owner=owner,
+                reuse_indexed_adapter=True,
             )
             viewport.set_selected_owner(owner)
         else:
@@ -657,27 +702,32 @@ class VPSnapshotBatchPanel(QGroupBox):
         relative = str(
             output_path.relative_to(self._root)).replace("\\", "/")
 
+        if self.skip_existing_check.isChecked() \
+                and output_path.is_file() \
+                and output_path.stat().st_size > 0:
+            self._record(
+                source, view, relative,
+                "EXISTS", "Existing non-empty PNG retained; renderer and "
+                "source profile were not verified",
+                existing_unverified=True)
+            self._existing += 1
+            QTimer.singleShot(0, self._step)
+            return
+
         try:
             self._load_source(source)
         except Exception as exc:
             message = str(exc)
-            self._record(source, view, "", "ERROR", message)
+            self._record(
+                source, view, "", "ERROR", message,
+                renderer_reason=message)
             self._warnings.append(
                 f"{source.folder_name} [{view}]: {message}")
             self._failed += 1
             QTimer.singleShot(0, self._step)
             return
 
-        if self.skip_existing_check.isChecked() \
-                and output_path.is_file() \
-                and output_path.stat().st_size > 0:
-            self._record(
-                source, view, relative,
-                "EXISTS", "Existing non-empty PNG retained")
-            self._existing += 1
-            QTimer.singleShot(0, self._step)
-            return
-
+        had_existing_final = output_path.is_file()
         try:
             self._batch_viewport.apply_snapshot_preset(
                 view, self._target_size, self._zoom)
@@ -689,14 +739,22 @@ class VPSnapshotBatchPanel(QGroupBox):
             if image.isNull():
                 raise RuntimeError(
                     "Snapshot renderer returned a null image")
-            writer = QImageWriter(str(output_path), b"png")
-            if not writer.write(image):
-                raise OSError(
-                    writer.errorString()
-                    or f"Could not write {output_path}")
+            self._write_png_atomic(image, output_path)
         except Exception as exc:
             message = str(exc)
-            self._record(source, view, "", "ERROR", message)
+            retained = had_existing_final and output_path.is_file()
+            status = (
+                "ERROR_EXISTING_RETAINED" if retained else "ERROR")
+            if retained:
+                message = f"{message}; existing final retained"
+            self._record(
+                source, view, relative if retained else "", status, message,
+                renderer_info=(
+                    self._batch_viewport.indexed_renderer_info
+                    if self._batch_viewport is not None else None
+                ),
+                renderer_reason=message,
+            )
             self._warnings.append(
                 f"{source.folder_name} [{view}]: {message}")
             self._failed += 1
@@ -706,14 +764,56 @@ class VPSnapshotBatchPanel(QGroupBox):
                 else "textured")
             self._record(
                 source, view, relative, "WRITTEN",
-                f"{image.width()}x{image.height()} transparent PNG ({mode})")
+                f"{image.width()}x{image.height()} transparent PNG ({mode})",
+                renderer_info=(
+                    self._batch_viewport.indexed_renderer_info
+                    if self._batch_viewport is not None else None
+                ),
+            )
             self._written += 1
 
         QTimer.singleShot(0, self._step)
 
+    @staticmethod
+    def _write_png_atomic(image, output_path: Path) -> None:
+        """Commit a PNG only after a complete sibling temporary write."""
+
+        partial = output_path.with_name(f"{output_path.name}.part")
+        try:
+            if partial.exists():
+                partial.unlink()
+            writer = QImageWriter(str(partial), b"png")
+            written = writer.write(image)
+            writer_error = writer.errorString()
+            del writer
+            if not written:
+                raise OSError(
+                    writer_error
+                    or f"Could not write {partial}")
+            if not partial.is_file() or partial.stat().st_size <= 0:
+                raise OSError(
+                    f"PNG writer produced no non-empty file at {partial}")
+            os.replace(partial, output_path)
+        except Exception:
+            try:
+                if partial.exists():
+                    partial.unlink()
+            except OSError:
+                pass
+            raise
+
     def _record(
             self, source: SnapshotSource, view: str,
-            relative_file: str, status: str, message: str) -> None:
+            relative_file: str, status: str, message: str,
+            renderer_info: dict | None = None,
+            existing_unverified: bool = False,
+            renderer_reason: str = "") -> None:
+        renderer = self._renderer_manifest_fields(
+            renderer_info,
+            status=status,
+            existing_unverified=existing_unverified,
+            reason=renderer_reason,
+        )
         self._rows.append(BatchManifestRow(
             source.source_kind,
             source.source_id,
@@ -727,12 +827,131 @@ class VPSnapshotBatchPanel(QGroupBox):
             relative_file,
             status,
             message,
+            renderer["requested_renderer"],
+            renderer["effective_renderer"],
+            renderer["fallback_used"],
+            renderer["fallback_reason"],
+            renderer["palette_sha256"],
+            renderer["shadermp_sha256"],
+            renderer["tracyrmp_sha256"],
+            renderer["index_buffer_sha256"],
         ))
+
+    def _renderer_manifest_fields(
+            self, renderer_info: dict | None,
+            *, status: str = "WRITTEN",
+            existing_unverified: bool = False,
+            reason: str = "") -> dict[str, object]:
+        status = str(status).upper()
+        requested = (
+            "retail_indexed_reconstructed"
+            if self._renderer_mode == "textured_indexed"
+            else "openua_preview"
+        )
+        existing_output = (
+            existing_unverified
+            or status in {"EXISTS", "ERROR_EXISTING_RETAINED"}
+        )
+        rendered_output = status == "WRITTEN"
+        if existing_output:
+            effective = "existing_file_not_verified"
+            fallback = False
+            fallback_reason = reason or (
+                "existing file retained without renderer/source verification")
+        elif not rendered_output:
+            effective = "not_rendered"
+            if requested == "retail_indexed_reconstructed":
+                fallback = bool(
+                    isinstance(renderer_info, dict)
+                    and renderer_info.get("fallback_used", False)
+                )
+                fallback_reason = str(
+                    renderer_info.get("fallback_reason", "")
+                    if isinstance(renderer_info, dict) else ""
+                ) or reason
+            else:
+                fallback = False
+                fallback_reason = reason
+        elif requested == "openua_preview":
+            effective = "openua_preview"
+            fallback = False
+            fallback_reason = ""
+        elif renderer_info is None:
+            effective = "not_rendered"
+            fallback = False
+            fallback_reason = reason
+        else:
+            effective = str(
+                renderer_info.get("effective_mode", "not_rendered"))
+            fallback = bool(renderer_info.get("fallback_used", False))
+            fallback_reason = str(
+                renderer_info.get("fallback_reason", "") or reason)
+
+        indexed_attempt = (
+            requested == "retail_indexed_reconstructed"
+            and isinstance(renderer_info, dict)
+            and status != "EXISTS"
+        )
+        sources = renderer_info.get("sources", {}) if indexed_attempt else {}
+        stats = (
+            renderer_info.get("last_render_stats", {})
+            if indexed_attempt and rendered_output else {}
+        )
+        return {
+            "requested_renderer": requested,
+            "effective_renderer": effective,
+            "fallback_used": fallback,
+            "fallback_reason": fallback_reason,
+            "palette_sha256": str(
+                sources.get("palette", {}).get("sha256", "")),
+            "shadermp_sha256": str(
+                sources.get("shader", {}).get("sha256", "")),
+            "tracyrmp_sha256": str(
+                sources.get("tracy", {}).get("sha256", "")),
+            "index_buffer_sha256": str(
+                stats.get("index_buffer_sha256", "")),
+        }
 
     def _write_manifests(self, cancelled: bool) -> None:
         if self._root is None:
             return
         rows = [asdict(row) for row in self._rows]
+        outcome_counts: dict[str, int] = {}
+        written_effective_counts: dict[str, int] = {}
+        for row in self._rows:
+            outcome_counts[row.status] = outcome_counts.get(row.status, 0) + 1
+            if row.status == "WRITTEN":
+                written_effective_counts[row.effective_renderer] = (
+                    written_effective_counts.get(row.effective_renderer, 0) + 1
+                )
+        written_source_profiles = sorted({
+            (
+                row.palette_sha256,
+                row.shadermp_sha256,
+                row.tracyrmp_sha256,
+            )
+            for row in self._rows
+            if row.status == "WRITTEN"
+            and (
+                row.palette_sha256
+                or row.shadermp_sha256
+                or row.tracyrmp_sha256
+            )
+        })
+        attempted_source_profiles = sorted({
+            (
+                row.palette_sha256,
+                row.shadermp_sha256,
+                row.tracyrmp_sha256,
+            )
+            for row in self._rows
+            if row.status != "WRITTEN"
+            and (
+                row.palette_sha256
+                or row.shadermp_sha256
+                or row.tracyrmp_sha256
+            )
+        })
         (self._root / "manifest.json").write_text(
             json.dumps(rows, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -753,12 +972,50 @@ class VPSnapshotBatchPanel(QGroupBox):
             + ("\n" if self._warnings else ""),
             encoding="utf-8",
         )
+        setbas_path = str(getattr(
+            getattr(self.window, "_setbas", None),
+            "path", "",
+        ))
+        renderer_summary = {
+            "requested_renderer": (
+                "retail_indexed_reconstructed"
+                if self._renderer_mode == "textured_indexed"
+                else "openua_preview"
+            ),
+            "outcome_counts": outcome_counts,
+            "written_effective_image_counts": written_effective_counts,
+            "fallback_written_rows": sum(
+                1 for row in self._rows
+                if row.status == "WRITTEN" and row.fallback_used),
+            "source_profiles": [
+                {
+                    "palette_sha256": palette,
+                    "shadermp_sha256": shader,
+                    "tracyrmp_sha256": tracy,
+                }
+                for palette, shader, tracy in written_source_profiles
+            ],
+            "note": (
+                "Only WRITTEN rows contribute effective renderer counts and "
+                "source profiles. EXISTS and ERROR_EXISTING_RETAINED files "
+                "are retained but not renderer-verified; per-image provenance "
+                "is authoritative in manifest.json"
+            ),
+        }
+        if attempted_source_profiles:
+            renderer_summary["attempted_source_profiles"] = [
+                {
+                    "palette_sha256": palette,
+                    "shadermp_sha256": shader,
+                    "tracyrmp_sha256": tracy,
+                }
+                for palette, shader, tracy in attempted_source_profiles
+            ]
+
         run_info = {
             "feature": "OpenUAStudio Snapshot Studio complete model batch",
-            "setbas": str(getattr(
-                getattr(self.window, "_setbas", None),
-                "path", "",
-            )),
+            "setbas": setbas_path,
+            "setbas_sha256": file_sha256(setbas_path) if setbas_path else "",
             "vp_source": str(getattr(
                 self.window, "_vp_source", "")),
             "vp_source_path": str(getattr(
@@ -777,6 +1034,8 @@ class VPSnapshotBatchPanel(QGroupBox):
             "transparent_background": True,
             "guides": False,
             "animation_frame": "initial/reset",
+            "renderer_mode": self._renderer_mode,
+            "renderer_summary": renderer_summary,
             "written": self._written,
             "existing": self._existing,
             "skipped_models": self._skipped_models,
@@ -812,23 +1071,64 @@ class VPSnapshotBatchPanel(QGroupBox):
                     compression=zipfile.ZIP_DEFLATED,
                     compresslevel=1,
                     allowZip64=True) as archive:
-                for path in sorted(self._root.rglob("*")):
+                for path, relative in self._authorized_zip_files():
                     if self._cancel_requested:
                         raise InterruptedError
-                    if path.is_file():
-                        archive.write(
-                            path,
-                            arcname=(
-                                f"{self._root.name}/"
-                                f"{path.relative_to(self._root)}"),
-                        )
-                        QApplication.processEvents()
+                    archive.write(
+                        path,
+                        arcname=f"{self._root.name}/{relative}",
+                    )
+                    QApplication.processEvents()
             os.replace(partial, zip_path)
         except InterruptedError:
             if partial.exists():
                 partial.unlink()
             return None
+        except Exception:
+            try:
+                if partial.exists():
+                    partial.unlink()
+            except OSError:
+                pass
+            raise
         return zip_path
+
+    def _authorized_zip_files(self) -> list[tuple[Path, str]]:
+        """Return only manifest-authorized images and fixed run metadata."""
+
+        if self._root is None:
+            return []
+        root = self._root.resolve()
+        requested = {
+            row.relative_file
+            for row in self._rows
+            if row.status in _ZIP_IMAGE_STATUSES and row.relative_file
+        }
+        requested.update(_ZIP_METADATA_FILES)
+
+        authorized: dict[str, Path] = {}
+        for value in requested:
+            raw = str(value)
+            windows = PureWindowsPath(raw)
+            relative = PurePosixPath(raw.replace("\\", "/"))
+            if windows.drive or windows.is_absolute() \
+                    or relative.is_absolute() \
+                    or not relative.parts \
+                    or any(part in {"", ".", ".."}
+                           for part in relative.parts):
+                continue
+            path = (root / Path(*relative.parts)).resolve()
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            if path.is_file():
+                authorized[relative.as_posix()] = path
+
+        return [
+            (authorized[relative], relative)
+            for relative in sorted(authorized)
+        ]
 
     def _dispose_batch_viewport(self) -> None:
         viewport = self._batch_viewport

@@ -103,6 +103,11 @@ class AssetFamily:
     setbas_overrides: dict[str, bool] = field(default_factory=dict)
     external_palette: Palette | None = None
     external_palette_path: Path | None = None
+    # Palette selection was historically allowed to be ambiguous because it
+    # was only a preview aid.  Exact indexed rendering must retain that
+    # provenance and refuse to infer a SET/remap family from a ranked guess.
+    external_palette_status: str = ""
+    external_palette_candidates: list[str] = field(default_factory=list)
     search_roots: list[str] = field(default_factory=list)
     search_root: str = ""            # primary root (the .base parent dir)
     warnings: list[str] = field(default_factory=list)
@@ -405,6 +410,10 @@ def _find_external_palette(family: AssetFamily, resolver: AssetResolver) -> None
     for pal_name in ("NORMAL.PAL", "STANDARD.PAL"):
         ref = resolver.resolve(pal_name, "palette")
         if ref.path is not None:
+            family.external_palette_status = ref.status
+            family.external_palette_candidates = [
+                str(path) for path in ref.candidates
+            ]
             palette = parse_pal_file(ref.path)
             if palette:
                 family.external_palette = palette
@@ -413,6 +422,12 @@ def _find_external_palette(family: AssetFamily, resolver: AssetResolver) -> None
                     f"Using external palette {ref.path.name} for textures "
                     "without CMAP."
                 )
+                if ref.status == "ambiguous":
+                    family.warnings.append(
+                        "The external preview palette is ambiguous. Retail "
+                        "indexed rendering is disabled until a set-specific "
+                        "source root or palette is selected."
+                    )
                 return
     family.warnings.append(
         "Some textures have no CMAP and no external .PAL was found; "

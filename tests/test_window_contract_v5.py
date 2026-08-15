@@ -164,6 +164,66 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_reconstructed_retail_renderer_is_an_explicit_synced_choice(self):
+        window = AssemblyWindow()
+        try:
+            toolbar_index = window.mode_combo.findData("textured_indexed")
+            snapshot_index = window.snapshot_renderer_combo.findData(
+                "textured_indexed")
+            self.assertGreaterEqual(toolbar_index, 0)
+            self.assertGreaterEqual(snapshot_index, 0)
+            self.assertIn(
+                "reconstructed",
+                window.mode_combo.itemText(toolbar_index).casefold(),
+            )
+
+            window.mode_combo.setCurrentIndex(toolbar_index)
+            self.app.processEvents()
+            self.assertEqual(window.viewport.view_mode, "textured_indexed")
+            self.assertEqual(
+                window.snapshot_renderer_combo.currentData(),
+                "textured_indexed",
+            )
+
+            standard_index = window.snapshot_renderer_combo.findData(
+                "textured")
+            window.snapshot_renderer_combo.setCurrentIndex(standard_index)
+            self.app.processEvents()
+            self.assertEqual(window.viewport.view_mode, "textured")
+            self.assertEqual(window.mode_combo.currentData(), "textured")
+        finally:
+            window.close()
+
+    def test_snapshot_renderer_resynchronizes_after_snapshot_lifecycle(self):
+        window = AssemblyWindow()
+        try:
+            window._right_tabs.setCurrentWidget(window._visuals_tabs)
+            window._visuals_tabs.setCurrentWidget(window._snapshot_panel)
+            self.app.processEvents()
+            self.assertTrue(window._snapshot_mode_active)
+
+            indexed = window.snapshot_renderer_combo.findData(
+                "textured_indexed")
+            window.snapshot_renderer_combo.setCurrentIndex(indexed)
+            self.app.processEvents()
+            self.assertEqual(window.viewport.view_mode, "textured_indexed")
+
+            window._right_tabs.setCurrentWidget(window._resources_tabs)
+            self.app.processEvents()
+            self.assertFalse(window._snapshot_mode_active)
+            self.assertEqual(window.viewport.view_mode, "textured")
+            self.assertEqual(
+                window.snapshot_renderer_combo.currentData(), "textured")
+
+            window._right_tabs.setCurrentWidget(window._visuals_tabs)
+            window._visuals_tabs.setCurrentWidget(window._snapshot_panel)
+            self.app.processEvents()
+            self.assertEqual(window.viewport.view_mode, "textured")
+            self.assertEqual(
+                window.snapshot_renderer_combo.currentData(), "textured")
+        finally:
+            window.close()
+
     def test_file_menu_contains_only_the_asset_workbench_actions(self):
         window = AssemblyWindow()
         try:
