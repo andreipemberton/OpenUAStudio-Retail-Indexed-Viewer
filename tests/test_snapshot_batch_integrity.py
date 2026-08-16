@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 from types import MethodType, SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import zipfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -31,13 +31,25 @@ def _row(
         shader: str = "",
         tracy: str = "",
         index_buffer: str = "",
-        fallback: bool = False) -> BatchManifestRow:
+        fallback: bool = False,
+        requested_destination_mode: str = "live_framebuffer",
+        requested_forced_index: int | None = None,
+        effective_destination_mode: str = "",
+        effective_destination_class: str = "",
+        effective_forced_index: int | None = None,
+        effective_initial_index: int | None = None,
+        effective_initial_rgb: str = "",
+        effective_forced_rgb: str = "") -> BatchManifestRow:
     return BatchManifestRow(
         "VP", 1, 1, "VP_TEST", 1, "Skeleton/VP_TEST.sklt",
         "root", "Skeleton/VP_TEST.sklt", "Front", relative_file,
         status, status, "retail_indexed_reconstructed", effective,
         fallback, "synthetic fallback" if fallback else "",
         palette, shader, tracy, index_buffer,
+        requested_destination_mode, requested_forced_index,
+        effective_destination_mode, effective_destination_class,
+        effective_forced_index, effective_initial_index,
+        effective_initial_rgb, effective_forced_rgb,
     )
 
 
@@ -70,6 +82,164 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_batch_freezes_and_propagates_destination_controls(self):
+        panel = SimpleNamespace(
+            window=SimpleNamespace(viewport=SimpleNamespace(
+                flat_tracy_destination_mode="forced_diagnostic",
+                flat_tracy_forced_destination_index=31,
+            )),
+            _renderer_mode="textured_indexed",
+        )
+
+        VPSnapshotBatchPanel._capture_flat_tracy_destination_settings(panel)
+        self.assertEqual(
+            panel._flat_tracy_destination_mode, "forced_diagnostic")
+        self.assertEqual(panel._flat_tracy_forced_destination_index, 31)
+
+        viewport = Mock()
+        with patch(
+                "snapshot_studio.batch_export.AssetViewport",
+                return_value=viewport) as viewport_type:
+            created = VPSnapshotBatchPanel._create_batch_viewport(panel)
+
+        self.assertIs(created, viewport)
+        viewport_type.assert_called_once_with(panel)
+        viewport.set_mode.assert_called_once_with("textured_indexed")
+        viewport.set_flat_tracy_forced_destination_index.assert_called_once_with(
+            31)
+        viewport.set_flat_tracy_destination_mode.assert_called_once_with(
+            "forced_diagnostic")
+        viewport.begin_snapshot_mode.assert_called_once_with(None)
+        viewport.play_animation.assert_called_once_with(False)
+        viewport.set_snapshot_guides_visible.assert_called_once_with(False)
+
+    def test_invalid_destination_controls_fall_back_to_retail_live(self):
+        panel = SimpleNamespace(window=SimpleNamespace(
+            viewport=SimpleNamespace(
+                flat_tracy_destination_mode="unknown",
+                flat_tracy_forced_destination_index=999,
+            )))
+
+        VPSnapshotBatchPanel._capture_flat_tracy_destination_settings(panel)
+
+        self.assertEqual(
+            panel._flat_tracy_destination_mode, "live_framebuffer")
+        self.assertEqual(panel._flat_tracy_forced_destination_index, 0)
+
+    def test_skip_existing_rejects_unverified_and_mismatched_profiles(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "existing.png").write_bytes(b"png")
+            panel = SimpleNamespace(
+                _root=root,
+                _renderer_mode="textured_indexed",
+                _flat_tracy_destination_mode="forced_diagnostic",
+                _flat_tracy_forced_destination_index=31,
+                skip_existing_check=SimpleNamespace(isChecked=lambda: True),
+            )
+
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("no run_info.json", reason)
+
+            (root / "run_info.json").write_text(
+                "not json", encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("cannot be verified", reason)
+
+            (root / "run_info.json").write_text(json.dumps({
+                "renderer_mode": "textured_indexed",
+                "indexed_flat_tracy_destination_mode_requested": (
+                    "live_framebuffer"),
+                "indexed_flat_tracy_forced_destination_index_requested": None,
+            }), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("live framebuffer", reason)
+            self.assertIn("forced diagnostic row 31", reason)
+
+            (root / "run_info.json").write_text(json.dumps({
+                "renderer_mode": "textured_indexed",
+                "indexed_flat_tracy_destination_mode_requested": (
+                    "forced_diagnostic"),
+                "indexed_flat_tracy_forced_destination_index_requested": 13,
+            }), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("forced diagnostic row 13", reason)
+            self.assertIn("forced diagnostic row 31", reason)
+
+    def test_skip_existing_accepts_only_matching_verified_profile(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "VP").mkdir()
+            (root / "VP" / "front.PNG").write_bytes(b"png")
+            (root / "run_info.json").write_text(json.dumps({
+                "renderer_mode": "textured_indexed",
+                "indexed_flat_tracy_destination_mode_requested": (
+                    "forced_diagnostic"),
+                "indexed_flat_tracy_forced_destination_index_requested": 31,
+            }), encoding="utf-8")
+            panel = SimpleNamespace(
+                _root=root,
+                _renderer_mode="textured_indexed",
+                _flat_tracy_destination_mode="forced_diagnostic",
+                _flat_tracy_forced_destination_index=31,
+                skip_existing_check=SimpleNamespace(isChecked=lambda: True),
+            )
+
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+
+            self.assertEqual(reason, "")
+
+    def test_live_skip_profile_ignores_legacy_inactive_forced_index(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "front.png").write_bytes(b"png")
+            (root / "run_info.json").write_text(json.dumps({
+                "renderer_mode": "textured_indexed",
+                "indexed_flat_tracy_destination_mode_requested": (
+                    "live_framebuffer"),
+                # Earlier manifests retained the selector value even though
+                # live mode did not use it. It is semantically inactive.
+                "indexed_flat_tracy_forced_destination_index_requested": 220,
+            }), encoding="utf-8")
+            panel = SimpleNamespace(
+                _root=root,
+                _renderer_mode="textured_indexed",
+                _flat_tracy_destination_mode="live_framebuffer",
+                _flat_tracy_forced_destination_index=31,
+                skip_existing_check=SimpleNamespace(isChecked=lambda: True),
+            )
+
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+
+            self.assertEqual(reason, "")
+
+    def test_skip_profile_preflight_is_inactive_when_overwriting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "front.png").write_bytes(b"png")
+            panel = SimpleNamespace(
+                _root=root,
+                skip_existing_check=SimpleNamespace(isChecked=lambda: False),
+            )
+
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+
+            self.assertEqual(reason, "")
+
     def test_openua_status_precedes_stale_indexed_renderer_info(self):
         stale_indexed = {
             "effective_mode": "retail_indexed_reconstructed",
@@ -81,8 +251,17 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                 "tracy": {"sha256": "stale-tracy"},
             },
             "last_render_stats": {"index_buffer_sha256": "stale-frame"},
+            "flat_tracy_destination_mode": "forced_diagnostic",
+            "flat_tracy_forced_destination_index": 31,
+            "initial_framebuffer_index": 0,
+            "initial_framebuffer_rgb": [0, 0, 0],
+            "flat_tracy_forced_destination_rgb": [12, 34, 56],
         }
-        panel = SimpleNamespace(_renderer_mode="textured")
+        panel = SimpleNamespace(
+            _renderer_mode="textured",
+            _flat_tracy_destination_mode="forced_diagnostic",
+            _flat_tracy_forced_destination_index=31,
+        )
 
         existing = VPSnapshotBatchPanel._renderer_manifest_fields(
             panel, stale_indexed, status="EXISTS")
@@ -102,9 +281,17 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             self.assertEqual(fields["shadermp_sha256"], "")
             self.assertEqual(fields["tracyrmp_sha256"], "")
             self.assertEqual(fields["index_buffer_sha256"], "")
+            self.assertEqual(
+                fields["requested_flat_tracy_destination_mode"], "")
+            self.assertIsNone(
+                fields["effective_flat_tracy_forced_destination_index"])
 
     def test_indexed_attempt_profile_excludes_stale_frame_hash_on_error(self):
-        panel = SimpleNamespace(_renderer_mode="textured_indexed")
+        panel = SimpleNamespace(
+            _renderer_mode="textured_indexed",
+            _flat_tracy_destination_mode="forced_diagnostic",
+            _flat_tracy_forced_destination_index=31,
+        )
         attempted = VPSnapshotBatchPanel._renderer_manifest_fields(
             panel,
             {
@@ -115,6 +302,9 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                     "tracy": {"sha256": "tracy"},
                 },
                 "last_render_stats": {"index_buffer_sha256": "old-frame"},
+                "flat_tracy_destination_mode": "forced_diagnostic",
+                "flat_tracy_forced_destination_index": 31,
+                "initial_framebuffer_index": 0,
             },
             status="ERROR",
             reason="atomic commit failed",
@@ -123,6 +313,111 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
         self.assertEqual(attempted["effective_renderer"], "not_rendered")
         self.assertEqual(attempted["palette_sha256"], "palette")
         self.assertEqual(attempted["index_buffer_sha256"], "")
+        self.assertEqual(
+            attempted["requested_flat_tracy_destination_mode"],
+            "forced_diagnostic",
+        )
+        self.assertEqual(
+            attempted["requested_flat_tracy_forced_destination_index"], 31)
+        self.assertEqual(
+            attempted["effective_flat_tracy_destination_mode"], "")
+        self.assertIsNone(
+            attempted["effective_initial_framebuffer_index"])
+
+    def test_destination_provenance_is_effective_only_for_exact_written(self):
+        panel = SimpleNamespace(
+            _renderer_mode="textured_indexed",
+            _flat_tracy_destination_mode="forced_diagnostic",
+            _flat_tracy_forced_destination_index=31,
+        )
+        renderer_info = {
+            "effective_mode": "retail_indexed_forced_tracy_diagnostic",
+            "fallback_used": False,
+            "flat_tracy_destination_mode": "forced_diagnostic",
+            "flat_tracy_forced_destination_index": 31,
+            "initial_framebuffer_index": 0,
+            "initial_framebuffer_rgb": [1, 2, 3],
+            "flat_tracy_forced_destination_rgb": [12, 34, 56],
+        }
+
+        written = VPSnapshotBatchPanel._renderer_manifest_fields(
+            panel, renderer_info, status="WRITTEN")
+        self.assertEqual(
+            written["requested_flat_tracy_destination_mode"],
+            "forced_diagnostic",
+        )
+        self.assertEqual(
+            written["effective_flat_tracy_destination_mode"],
+            "forced_diagnostic",
+        )
+        self.assertEqual(
+            written["effective_flat_tracy_destination_class"], "diagnostic")
+        self.assertEqual(
+            written["effective_flat_tracy_forced_destination_index"], 31)
+        self.assertEqual(written["effective_initial_framebuffer_index"], 0)
+        self.assertEqual(written["effective_initial_framebuffer_rgb"], "#010203")
+        self.assertEqual(
+            written["effective_flat_tracy_forced_destination_rgb"],
+            "#0C2238",
+        )
+
+        for status in ("EXISTS", "ERROR", "ERROR_EXISTING_RETAINED"):
+            fields = VPSnapshotBatchPanel._renderer_manifest_fields(
+                panel, renderer_info, status=status)
+            self.assertEqual(
+                fields["requested_flat_tracy_destination_mode"],
+                "forced_diagnostic",
+            )
+            self.assertEqual(
+                fields["effective_flat_tracy_destination_mode"], "")
+            self.assertIsNone(
+                fields["effective_flat_tracy_forced_destination_index"])
+            self.assertIsNone(
+                fields["effective_initial_framebuffer_index"])
+
+        fallback = VPSnapshotBatchPanel._renderer_manifest_fields(
+            panel,
+            {
+                **renderer_info,
+                "effective_mode": "openua_preview_fallback",
+                "fallback_used": True,
+            },
+            status="WRITTEN",
+        )
+        self.assertEqual(
+            fallback["effective_flat_tracy_destination_mode"], "")
+        self.assertIsNone(
+            fallback["effective_flat_tracy_forced_destination_index"])
+
+    def test_live_destination_is_canonical_and_has_no_forced_effective_index(self):
+        panel = SimpleNamespace(
+            _renderer_mode="textured_indexed",
+            _flat_tracy_destination_mode="live_framebuffer",
+            _flat_tracy_forced_destination_index=220,
+        )
+        fields = VPSnapshotBatchPanel._renderer_manifest_fields(
+            panel,
+            {
+                "effective_mode": "retail_indexed_reconstructed",
+                "fallback_used": False,
+                "flat_tracy_destination_mode": "live_framebuffer",
+                "flat_tracy_forced_destination_index": 220,
+                "initial_framebuffer_index": 0,
+                "initial_framebuffer_rgb": [0, 0, 0],
+                "flat_tracy_forced_destination_rgb": [9, 9, 9],
+            },
+            status="WRITTEN",
+        )
+
+        self.assertEqual(
+            fields["effective_flat_tracy_destination_class"], "canonical")
+        self.assertIsNone(
+            fields["requested_flat_tracy_forced_destination_index"])
+        self.assertEqual(fields["effective_initial_framebuffer_index"], 0)
+        self.assertIsNone(
+            fields["effective_flat_tracy_forced_destination_index"])
+        self.assertEqual(
+            fields["effective_flat_tracy_forced_destination_rgb"], "")
 
     def test_atomic_png_replace_failure_preserves_old_final_and_cleans_part(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -258,7 +553,15 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                         "WRITTEN", "VP/front.png",
                         effective="retail_indexed_reconstructed",
                         palette="written-palette", shader="written-shader",
-                        tracy="written-tracy", index_buffer="written-frame"),
+                        tracy="written-tracy", index_buffer="written-frame",
+                        requested_destination_mode="forced_diagnostic",
+                        requested_forced_index=31,
+                        effective_destination_mode="forced_diagnostic",
+                        effective_destination_class="diagnostic",
+                        effective_forced_index=31,
+                        effective_initial_index=0,
+                        effective_initial_rgb="#000000",
+                        effective_forced_rgb="#0C2238"),
                     _row(
                         "EXISTS", "VP/side.png",
                         effective="existing_file_not_verified"),
@@ -272,6 +575,8 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                 ],
                 _warnings=[],
                 _renderer_mode="textured_indexed",
+                _flat_tracy_destination_mode="forced_diagnostic",
+                _flat_tracy_forced_destination_index=31,
                 window=SimpleNamespace(
                     _setbas=None, _vp_source="", _vp_source_path=""),
                 _sources=[_source()],
@@ -288,6 +593,8 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             summary = json.loads(
                 (root / "run_info.json").read_text(encoding="utf-8")
             )["renderer_summary"]
+            manifest = json.loads(
+                (root / "manifest.json").read_text(encoding="utf-8"))
 
             self.assertEqual(summary["outcome_counts"], {
                 "WRITTEN": 1,
@@ -309,6 +616,110 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                 "written-palette",
                 {profile["palette_sha256"] for profile in attempted},
             )
+            self.assertEqual(
+                summary["requested_flat_tracy_destination_mode"],
+                "forced_diagnostic",
+            )
+            self.assertEqual(
+                summary["requested_flat_tracy_destination_class"],
+                "diagnostic",
+            )
+            self.assertEqual(
+                summary["requested_flat_tracy_forced_destination_index"],
+                31,
+            )
+            self.assertEqual(
+                summary[
+                    "verified_written_flat_tracy_destination_profiles"],
+                [{
+                    "mode": "forced_diagnostic",
+                    "class": "diagnostic",
+                    "initial_framebuffer_index": 0,
+                    "forced_destination_index": 31,
+                }],
+            )
+            self.assertIn("do not alter filenames", summary["note"])
+            self.assertIn(
+                "do not alter image filenames",
+                summary["destination_profile_output_collision_warning"],
+            )
+            self.assertEqual(
+                summary["skip_existing_collision_policy"],
+                "populated_output_requires_matching_run_info_renderer_and_"
+                "destination_profile",
+            )
+            self.assertIsInstance(
+                manifest[0]["effective_initial_framebuffer_index"], int)
+            self.assertEqual(
+                manifest[0][
+                    "effective_flat_tracy_forced_destination_index"],
+                31,
+            )
+            self.assertIsNone(
+                manifest[1][
+                    "effective_flat_tracy_forced_destination_index"])
+
+    def test_live_run_provenance_nulls_inactive_forced_index_everywhere(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            panel = SimpleNamespace(
+                _root=root,
+                _rows=[_row(
+                    "WRITTEN", "VP/front.png",
+                    effective="retail_indexed_reconstructed",
+                    requested_destination_mode="live_framebuffer",
+                    requested_forced_index=None,
+                    effective_destination_mode="live_framebuffer",
+                    effective_destination_class="canonical",
+                    effective_initial_index=0,
+                    effective_initial_rgb="#000000",
+                )],
+                _warnings=[],
+                _renderer_mode="textured_indexed",
+                _flat_tracy_destination_mode="live_framebuffer",
+                # The UI may retain a value while its control is inactive.
+                _flat_tracy_forced_destination_index=220,
+                window=SimpleNamespace(
+                    _setbas=None, _vp_source="", _vp_source_path=""),
+                _sources=[_source()],
+                _target_size=QSize(1024, 1024),
+                _zoom=100,
+                _written=1,
+                _existing=0,
+                _skipped_models=0,
+                _failed=0,
+                _started_at=0.0,
+            )
+
+            VPSnapshotBatchPanel._write_manifests(panel, cancelled=False)
+            manifest = json.loads(
+                (root / "manifest.json").read_text(encoding="utf-8"))
+            run_info = json.loads(
+                (root / "run_info.json").read_text(encoding="utf-8"))
+            summary = run_info["renderer_summary"]
+
+            self.assertIsNone(
+                manifest[0][
+                    "requested_flat_tracy_forced_destination_index"])
+            self.assertEqual(
+                summary["requested_flat_tracy_destination_mode"],
+                "live_framebuffer",
+            )
+            self.assertEqual(
+                summary["requested_flat_tracy_destination_class"],
+                "canonical",
+            )
+            self.assertIsNone(
+                summary[
+                    "requested_flat_tracy_forced_destination_index"])
+            self.assertEqual(
+                run_info[
+                    "indexed_flat_tracy_destination_mode_requested"],
+                "live_framebuffer",
+            )
+            self.assertIsNone(
+                run_info[
+                    "indexed_flat_tracy_forced_destination_index_requested"])
 
     def test_zip_contains_only_authorized_images_and_fixed_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:

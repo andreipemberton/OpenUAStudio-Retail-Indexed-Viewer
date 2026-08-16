@@ -194,6 +194,65 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_flat_tracy_destination_selector_marks_forcing_as_diagnostic(self):
+        window = AssemblyWindow()
+        try:
+            policy = window.snapshot_tracy_destination_combo
+            index_spin = window.snapshot_tracy_destination_index_spin
+            swatch = window.snapshot_tracy_destination_swatch
+
+            self.assertEqual(policy.currentData(), "live_framebuffer")
+            self.assertEqual(index_spin.minimum(), 0)
+            self.assertEqual(index_spin.maximum(), 255)
+            self.assertFalse(policy.isEnabled())
+            self.assertFalse(index_spin.isEnabled())
+
+            indexed = window.snapshot_renderer_combo.findData(
+                "textured_indexed")
+            window.snapshot_renderer_combo.setCurrentIndex(indexed)
+            self.app.processEvents()
+            self.assertTrue(policy.isEnabled())
+            self.assertFalse(index_spin.isEnabled())
+
+            forced = policy.findData("forced_diagnostic")
+            self.assertIn("diagnostic", policy.itemText(forced).casefold())
+            policy.setCurrentIndex(forced)
+            index_spin.setValue(13)
+            self.app.processEvents()
+            self.assertTrue(index_spin.isEnabled())
+            self.assertEqual(
+                window.viewport.flat_tracy_destination_mode,
+                "forced_diagnostic")
+            self.assertEqual(
+                window.viewport.flat_tracy_forced_destination_index, 13)
+            self.assertEqual(
+                window._snapshot_renderer_filename_suffix(),
+                "_TRACY_FORCE_013_DIAGNOSTIC")
+
+            palette = tuple((value, value, value) for value in range(256))
+            raw_palette = list(palette)
+            raw_palette[0] = (255, 255, 0)
+            window.viewport._indexed_adapter = SimpleNamespace(
+                tables=SimpleNamespace(
+                    display_palette=palette, palette=tuple(raw_palette)))
+            index_spin.setValue(0)
+            window._update_flat_tracy_destination_controls()
+            self.assertEqual(swatch.text(), "#000000")
+            self.assertIn("Raw CMAP", swatch.toolTip())
+            index_spin.setValue(13)
+            window._update_flat_tracy_destination_controls()
+            self.assertEqual(swatch.text(), "#0D0D0D")
+
+            standard = window.snapshot_renderer_combo.findData("textured")
+            window.snapshot_renderer_combo.setCurrentIndex(standard)
+            self.app.processEvents()
+            self.assertFalse(policy.isEnabled())
+            self.assertFalse(index_spin.isEnabled())
+            self.assertEqual(index_spin.value(), 13)
+            self.assertEqual(window._snapshot_renderer_filename_suffix(), "")
+        finally:
+            window.close()
+
     def test_snapshot_renderer_resynchronizes_after_snapshot_lifecycle(self):
         window = AssemblyWindow()
         try:

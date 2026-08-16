@@ -82,6 +82,7 @@ from anm_parser import AnmParseError, export_anm_bytes, parse_anm_bytes
 from asset_tree_filter import filter_tree as filter_asset_tree
 from assembly_viewer import (
     AssetViewport,
+    FLAT_TRACY_DESTINATION_MODES,
     TEXTURED_VIEW_MODES,
     VIEW_MODES,
     VIEW_PRESETS,
@@ -509,6 +510,8 @@ class AssemblyWindow(QMainWindow):
         self._texture_qimage_cache: dict[tuple, QImage] = {}
 
         self.viewport = AssetViewport()
+        self.viewport.indexedPaletteChanged.connect(
+            self._update_flat_tracy_destination_controls)
         self.viewport.statusMessage.connect(
             lambda text: self._notify(text, 4500)
         )
@@ -1779,9 +1782,8 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_color_button.setToolTip(
             "No color selected: preview uses the normal dark background and "
             "export is transparent.\nClick to choose a custom background "
-            "color. In Retail indexed mode, a non-black RGB color is a "
-            "presentation post-composite; TRACY is evaluated against palette "
-            "index 0 before the color is applied.")
+            "color. In Retail indexed mode, RGB is a presentation-only "
+            "post-composite and never selects a numeric TRACY destination.")
         self.snapshot_color_button.clicked.connect(
             self._choose_snapshot_color)
         background_layout.addWidget(self.snapshot_color_button, 0, 1)
@@ -1790,6 +1792,45 @@ class AssemblyWindow(QMainWindow):
             self._clear_snapshot_color)
         self.snapshot_clear_color_button.setEnabled(False)
         background_layout.addWidget(self.snapshot_clear_color_button, 0, 2)
+
+        background_layout.addWidget(QLabel("Flat/LUM-TRACY:"), 1, 0)
+        self.snapshot_tracy_destination_combo = QComboBox()
+        self.snapshot_tracy_destination_combo.addItem(
+            "Live framebuffer — retail", "live_framebuffer")
+        self.snapshot_tracy_destination_combo.addItem(
+            "Force palette row — diagnostic", "forced_diagnostic")
+        self.snapshot_tracy_destination_combo.setToolTip(
+            "Retail behavior clears the indexed frame to palette index 0, "
+            "then every flat/LUM-TRACY texel reads the live destination under "
+            "that pixel.\nThe forced-row option is a diagnostic for inspecting "
+            "TRACYRMP; it is not canonical retail compositing and does not "
+            "affect clear-TRACY materials.")
+        self.snapshot_tracy_destination_combo.currentIndexChanged.connect(
+            self._on_flat_tracy_destination_mode_changed)
+        background_layout.addWidget(
+            self.snapshot_tracy_destination_combo, 1, 1, 1, 2)
+
+        self.snapshot_tracy_index_label = QLabel("Forced index:")
+        background_layout.addWidget(self.snapshot_tracy_index_label, 2, 0)
+        self.snapshot_tracy_destination_index_spin = QSpinBox()
+        self.snapshot_tracy_destination_index_spin.setRange(0, 255)
+        self.snapshot_tracy_destination_index_spin.setValue(0)
+        self.snapshot_tracy_destination_index_spin.setToolTip(
+            "Numeric destination row used independently for every flat/LUM-"
+            "TRACY lookup in forced diagnostic mode. RGB color is not used to "
+            "infer this index.")
+        self.snapshot_tracy_destination_index_spin.valueChanged.connect(
+            self._on_flat_tracy_destination_index_changed)
+        background_layout.addWidget(
+            self.snapshot_tracy_destination_index_spin, 2, 1)
+        self.snapshot_tracy_destination_swatch = QLabel("No palette")
+        self.snapshot_tracy_destination_swatch.setAlignment(
+            Qt.AlignmentFlag.AlignCenter)
+        self.snapshot_tracy_destination_swatch.setMinimumWidth(76)
+        self.snapshot_tracy_destination_swatch.setFixedHeight(26)
+        background_layout.addWidget(
+            self.snapshot_tracy_destination_swatch, 2, 2)
+        self._update_flat_tracy_destination_controls()
         studio_layout.addWidget(background_box)
 
         output_box = QGroupBox("Output size")
@@ -4104,6 +4145,7 @@ class AssemblyWindow(QMainWindow):
                 self.snapshot_renderer_combo.blockSignals(True)
                 self.snapshot_renderer_combo.setCurrentIndex(renderer_index)
                 self.snapshot_renderer_combo.blockSignals(False)
+        self._update_flat_tracy_destination_controls()
         if mode != "textured_indexed":
             self._notify(
                 f"Viewport mode changed to {self.mode_combo.currentText()}.",
@@ -4121,12 +4163,84 @@ class AssemblyWindow(QMainWindow):
             self.mode_combo.blockSignals(True)
             self.mode_combo.setCurrentIndex(toolbar_index)
             self.mode_combo.blockSignals(False)
+        self._update_flat_tracy_destination_controls()
         if mode != "textured_indexed":
             self._notify(
                 f"Snapshot renderer changed to "
                 f"{self.snapshot_renderer_combo.currentText()}.",
                 5000,
             )
+
+    def _on_flat_tracy_destination_mode_changed(self, _index: int) -> None:
+        mode = self.snapshot_tracy_destination_combo.currentData()
+        if mode not in FLAT_TRACY_DESTINATION_MODES:
+            return
+        self.viewport.set_flat_tracy_destination_mode(mode)
+        self._update_flat_tracy_destination_controls()
+
+    def _on_flat_tracy_destination_index_changed(self, value: int) -> None:
+        self.viewport.set_flat_tracy_forced_destination_index(value)
+        self._update_flat_tracy_destination_controls()
+
+    def _update_flat_tracy_destination_controls(self) -> None:
+        combo = getattr(self, "snapshot_tracy_destination_combo", None)
+        spin = getattr(
+            self, "snapshot_tracy_destination_index_spin", None)
+        swatch = getattr(self, "snapshot_tracy_destination_swatch", None)
+        label = getattr(self, "snapshot_tracy_index_label", None)
+        renderer = getattr(self, "snapshot_renderer_combo", None)
+        if combo is None or spin is None or swatch is None or label is None:
+            return
+
+        mode = self.viewport.flat_tracy_destination_mode
+        mode_index = combo.findData(mode)
+        if mode_index >= 0 and combo.currentIndex() != mode_index:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(mode_index)
+            combo.blockSignals(False)
+        selected_index = self.viewport.flat_tracy_destination_index
+        if spin.value() != selected_index:
+            spin.blockSignals(True)
+            spin.setValue(selected_index)
+            spin.blockSignals(False)
+
+        indexed = bool(
+            renderer is not None
+            and renderer.currentData() == "textured_indexed")
+        forced = indexed and mode == "forced_diagnostic"
+        combo.setEnabled(indexed)
+        label.setEnabled(forced)
+        spin.setEnabled(forced)
+        swatch.setEnabled(forced)
+
+        display_rgb = self.viewport.flat_tracy_destination_display_rgb
+        raw_rgb = self.viewport.flat_tracy_destination_raw_rgb
+        if display_rgb is None:
+            swatch.setText("No palette")
+            swatch.setStyleSheet(
+                "border: 1px solid #777; color: #aaa; background: #333;")
+            swatch.setToolTip(
+                "Load an asset with a resolved indexed palette to preview "
+                "this numeric palette entry.")
+            return
+
+        red, green, blue = display_rgb
+        color_hex = f"#{red:02x}{green:02x}{blue:02x}"
+        luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        text_color = "#111" if luminance >= 145 else "#fff"
+        swatch.setText(color_hex.upper())
+        swatch.setStyleSheet(
+            f"background-color: {color_hex}; color: {text_color}; "
+            "border: 1px solid #888;")
+        tooltip = (
+            f"Palette index {selected_index}: displayed RGB "
+            f"({red}, {green}, {blue}).")
+        if raw_rgb is not None and tuple(raw_rgb) != tuple(display_rgb):
+            tooltip += (
+                "\nRaw CMAP entry is "
+                f"({raw_rgb[0]}, {raw_rgb[1]}, {raw_rgb[2]}); the framebuffer "
+                "display palette is authoritative here.")
+        swatch.setToolTip(tooltip)
 
     def _sync_animation_controls(self) -> None:
         """Match controls and playback to the rendered selected subtree.
@@ -4338,6 +4452,7 @@ class AssemblyWindow(QMainWindow):
                            self.grid_check, self.overlay_check,
                            self.mapping_diag_check):
                 action.setEnabled(False)
+            self._update_flat_tracy_destination_controls()
             self._on_snapshot_preset_changed(
                 self.snapshot_view_combo.currentText())
         elif not entering and self._snapshot_mode_active:
@@ -4366,6 +4481,7 @@ class AssemblyWindow(QMainWindow):
                            self.grid_check, self.overlay_check,
                            self.mapping_diag_check):
                 action.setEnabled(True)
+            self._update_flat_tracy_destination_controls()
         self._sync_tab_edit_mode()
         if tabs is not None:
             outer_index = tabs.currentIndex()
@@ -4558,6 +4674,18 @@ class AssemblyWindow(QMainWindow):
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", name).strip(" ._")
         return name or "Snapshot"
 
+    def _snapshot_renderer_filename_suffix(self) -> str:
+        """Keep forced-row diagnostics visibly distinct by default."""
+
+        renderer = getattr(self, "snapshot_renderer_combo", None)
+        if renderer is None or renderer.currentData() != "textured_indexed":
+            return ""
+        if self.viewport.flat_tracy_destination_mode != "forced_diagnostic":
+            return ""
+        return (
+            "_TRACY_FORCE_"
+            f"{self.viewport.flat_tracy_destination_index:03d}_DIAGNOSTIC")
+
     def _export_snapshot(self) -> None:
         if not self.viewport.has_model:
             QMessageBox.information(self, "No model loaded",
@@ -4566,7 +4694,8 @@ class AssemblyWindow(QMainWindow):
         selected_format = self.snapshot_format_combo.currentData()
         preset = self.snapshot_view_combo.currentText().replace(" ", "")
         suggested = self._last_directory / (
-            f"{self._snapshot_name()}_{preset}.{selected_format}")
+            f"{self._snapshot_name()}_{preset}"
+            f"{self._snapshot_renderer_filename_suffix()}.{selected_format}")
         labels = {"png": "PNG (*.png)", "jpg": "JPEG (*.jpg *.jpeg)",
                   "webp": "WebP (*.webp)"}
         formats = [selected_format] + sorted(

@@ -51,18 +51,37 @@ renderer. Batch manifests record the requested and effective renderer for each
 image, fallback reasons, source-table hashes, and exact index-buffer hashes.
 `run_info.json` summarizes those per-image records without treating an old
 file retained by **Skip existing** as a newly verified indexed render.
+If the chosen batch folder already contains PNGs, **Skip existing** now
+requires its `run_info.json` to prove the same renderer and flat-TRACY
+destination profile; a different or unverifiable profile is refused before
+asset scanning.
+
+Snapshot Studio also exposes a **Flat/LUM-TRACY** destination selector. Its
+default **Live framebuffer - retail** setting preserves the source-traced frame
+clear at palette index zero and reads the actual destination beneath every
+effect texel. **Force palette row - diagnostic** lets an investigator inspect
+any one of the 256 `TRACYRMP` destination rows, but is deliberately labeled and
+recorded as noncanonical. The numeric index is authoritative; its swatch comes
+from the resolved indexed display palette and is never inferred from RGB.
+Live-mode manifests record no forced-row operand, even if the disabled row
+control retains a value for later diagnostic use.
 
 The reconstructed mode keeps source texture and framebuffer pixels as palette
-indices until final display. It applies the local game's `SHADERMP` lookup,
-rejects source-palette yellow chroma before remapping, and composites flat
-TRACY effects through the local `TRACYRMP` table. Nearest-neighbor indexed
-sampling is retained for transparent effect cards. This fixes important cases
-that ordinary RGB filtering and additive blending cannot represent, including
-Taerkasten Hauptstation lightning and the distinct clear-TRACY and flat-TRACY
-propeller systems.
+indices until final display. Ordinary mapped samples use the source-derived
+constant-brightness row in the local game's `SHADERMP`; clear-TRACY skips raw
+source index zero; and flat/LUM-TRACY bypasses
+shade and composites raw texels as
+`TRACYRMP[current_background][raw_source]`. Transparent source faces are
+replayed through a source-derived publish-depth/LIFO pass instead of being
+interleaved as ordinary BSP fragments. Nearest-neighbor indexed sampling is
+retained for effect cards. This fixes important cases that ordinary RGB
+filtering and additive blending cannot represent, including Taerkasten
+Hauptstation lightning and the distinct clear-TRACY and flat-TRACY propeller
+systems.
 
 See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
 fail-closed export rules, current limits, and reproducible test commands.
+Ongoing user-visible changes are maintained in [CHANGELOG.md](CHANGELOG.md).
 
 The mode requires a lawfully obtained local game data set containing a
 256-entry palette plus matching `REMAP/SHADERMP.ILB` (or `.ILBM`) and
@@ -89,10 +108,12 @@ reported as unsupported rather than guessed.
 For memory safety, NumPy-accelerated indexed exports are limited to 16,777,216
 pixels (a square 4096 x 4096 frame). The portable Python backend is limited to
 1,048,576 pixels. The normal OpenUA preview retains its existing output-size
-range. In exact mode, transparent or black output corresponds to destination
-palette index 0. A custom non-black RGB background is intentionally a
-presentation post-composite and does not become the destination of TRACY table
-lookups; the UI identifies this in the background control tooltip.
+range. Canonical indexed rendering always begins with the retail palette-index
+zero clear. A custom RGB background is intentionally a presentation
+post-composite and never becomes a numeric TRACY table operand. Forced-row
+diagnostic exports retain the retail initial clear but substitute the selected
+row for each flat/LUM-TRACY lookup; manifests distinguish them from canonical
+live-framebuffer renders.
 
 ## License
 

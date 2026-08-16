@@ -56,9 +56,9 @@ def _ua_profile_tracy_table() -> bytes:
     """Synthetic table satisfying the backend's fixed UA orientation gates."""
 
     table = bytearray(_identity_table())
-    for source in range(256):
-        table[source * 256] = 0 if source == 13 else source
-    for (source, destination), output in {
+    for background in range(256):
+        table[background * 256] = 0 if background == 13 else background
+    for (background, source), output in {
         (31, 220): 212,
         (220, 31): 200,
         (13, 255): 255,
@@ -67,8 +67,12 @@ def _ua_profile_tracy_table() -> bytes:
         (159, 185): 106,
         (159, 156): 63,
         (156, 159): 140,
+        (0, 156): 223,
+        (223, 159): 207,
+        (0, 159): 255,
+        (255, 156): 191,
     }.items():
-        table[source * 256 + destination] = output
+        table[background * 256 + source] = output
     return bytes(table)
 
 
@@ -336,7 +340,7 @@ class IndexedFamilyMaterialTests(unittest.TestCase):
 
             self.assertIs(adapter.block_for("root", 0), second)
             self.assertIs(adapter.block_for("root", 1), first)
-            self.assertEqual(surface.solid_index, 22)
+            self.assertEqual(surface.solid_index, 0)
 
     def test_animation_selects_raw_bitmap_by_supplied_frame(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -424,13 +428,13 @@ class IndexedFamilyMaterialTests(unittest.TestCase):
             self.assertEqual(adapter.active_uvs(material_a, 0), ((1, 2),))
             self.assertEqual(adapter.active_uvs(material_b, 0), ((201, 202),))
 
-    def test_solid_uses_per_atts_color_and_structural_flags(self):
+    def test_source_valid_nnn_is_opaque_index_zero_not_atts_color(self):
         with tempfile.TemporaryDirectory() as temporary:
             palette_path, _shader, _tracy, palette = _make_set_sources(
                 Path(temporary) / "Set1"
             )
             block = AmeshBlock(
-                polflags=0x50,
+                polflags=0x109,
                 color_val=6,
                 shade_val=7,
                 atts=[AttsEntry(9, 77, 88, 99, 0)],
@@ -445,12 +449,108 @@ class IndexedFamilyMaterialTests(unittest.TestCase):
             )
 
             self.assertEqual(surface.kind, "solid")
-            self.assertEqual(surface.solid_index, 77)
+            self.assertEqual(surface.solid_index, 0)
             self.assertIsNone(surface.indices)
-            self.assertEqual(surface.shade_mode, "flat")
-            self.assertEqual(surface.shade_value, 88)
-            self.assertEqual(surface.tracy_mode, "clear")
+            self.assertEqual(surface.shade_mode, "none")
+            self.assertEqual(surface.shade_value, 0)
+            self.assertEqual(surface.tracy_mode, "none")
             self.assertEqual(surface.map_mode, "linear")
+
+    def test_source_dispatch_rejects_unimplemented_flag_combination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            palette_path, _shader, _tracy, palette = _make_set_sources(
+                Path(temporary) / "Set1"
+            )
+            block = AmeshBlock(
+                polflags=0x50,
+                atts=[AttsEntry(9, 77, 88, 99, 0)],
+            )
+            family = _make_family(palette_path, palette, [block])
+            adapter, reason = IndexedFamilyAdapter.try_create(family)
+            self.assertEqual(reason, "")
+            assert adapter is not None
+
+            with self.assertRaisesRegex(
+                    UnsupportedIndexedMaterialError,
+                    r"dispatch code 0x50.*does not publish"):
+                adapter.resolve_surface(
+                    _face(0, 9, shade=None), _material("unsupported"), 0
+                )
+
+            self.assertEqual(
+                adapter.source_info["unsupported_material_codes"],
+                [{
+                    "block": "root block 0",
+                    "raw_polflags": 0x50,
+                    "retail_dispatch_code": 0x50,
+                }],
+            )
+            self.assertEqual(len(adapter.diagnostics), 1)
+
+    def test_constant_gradient_shade_uses_retail_rows_and_end_optimizations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            palette_path, _shader, _tracy, palette = _make_set_sources(
+                Path(temporary) / "Set1"
+            )
+            raw_shades = (0, 2, 3, 7, 31, 64, 128, 200, 253, 254, 255)
+            block = AmeshBlock(
+                # LGC plus the source-ignored texture-present bit.
+                area_flags=0x1,
+                polflags=0x7A,
+                texture=TextureRef(kind="ilbm", name="SHADED.ILBM"),
+                atts=[
+                    AttsEntry(poly_id, 91, shade, 0, 0)
+                    for poly_id, shade in enumerate(raw_shades)
+                ],
+            )
+            family = _make_family(
+                palette_path,
+                palette,
+                [block],
+                {"SHADED.ILBM": IlbmImage(width=1, height=1, pixels=b"\x07")},
+            )
+            adapter, reason = IndexedFamilyAdapter.try_create(family)
+            self.assertEqual(reason, "")
+            assert adapter is not None
+
+            surfaces = {
+                shade: adapter.resolve_surface(
+                    _face(0, poly_id, shade=None), _material("SHADED.ILBM"), 0
+                )
+                for poly_id, shade in enumerate(raw_shades)
+            }
+
+            for shade in (0, 2):
+                with self.subTest(raw_shade=shade):
+                    self.assertEqual(surfaces[shade].kind, "texture")
+                    self.assertEqual(surfaces[shade].shade_mode, "none")
+                    self.assertEqual(surfaces[shade].shade_value, 0)
+                    self.assertEqual(surfaces[shade].tracy_mode, "clear")
+            for shade, row in {
+                3: 4,
+                7: 8,
+                31: 32,
+                64: 64,
+                128: 128,
+                200: 199,
+                253: 251,
+            }.items():
+                with self.subTest(raw_shade=shade):
+                    self.assertEqual(surfaces[shade].kind, "texture")
+                    self.assertEqual(surfaces[shade].shade_mode, "gradient")
+                    self.assertEqual(surfaces[shade].shade_value, row)
+                    self.assertEqual(surfaces[shade].tracy_mode, "clear")
+            for shade in (254, 255):
+                with self.subTest(raw_shade=shade):
+                    self.assertEqual(surfaces[shade].kind, "solid")
+                    self.assertEqual(surfaces[shade].solid_index, 0)
+                    self.assertEqual(surfaces[shade].shade_mode, "none")
+                    self.assertEqual(surfaces[shade].tracy_mode, "none")
+
+            shade_info = adapter.source_info["shade_model"]
+            self.assertFalse(shade_info["depth_fade_emulated"])
+            self.assertEqual(shade_info["depth_fade_blocks"], ["root block 0"])
+            self.assertIn("outside dfade_start", shade_info["depth_fade_limitation"])
 
     def test_embedded_palette_wins_for_chroma_and_raw_bytes_are_cached(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -519,7 +619,9 @@ class IndexedFamilyMaterialTests(unittest.TestCase):
             block = AmeshBlock(
                 polflags=0x8A,
                 texture=TextureRef(kind="ilbm", name="FX1.ILBM"),
-                atts=[AttsEntry(0, 0, 0, 0, 0)],
+                # LNF never requests a brightness channel; even a nominal
+                # black-end authored shade must remain raw flat TRACY.
+                atts=[AttsEntry(0, 0, 255, 0, 0)],
             )
             family = _make_family(
                 palette_path,
@@ -533,10 +635,13 @@ class IndexedFamilyMaterialTests(unittest.TestCase):
             assert adapter is not None
 
             surface = adapter.resolve_surface(
-                _face(0, 0), _material("FX1.ILBM"), 0
+                _face(0, 0, shade=None), _material("FX1.ILBM"), 0
             )
 
             self.assertEqual(_surface_bytes(surface), b"\x0d\x9f")
+            self.assertEqual(surface.kind, "texture")
+            self.assertEqual(surface.shade_mode, "none")
+            self.assertEqual(surface.shade_value, 0)
             self.assertEqual(surface.tracy_mode, "flat")
             self.assertEqual(
                 adapter.source_info["effect_override_paths_ignored"],

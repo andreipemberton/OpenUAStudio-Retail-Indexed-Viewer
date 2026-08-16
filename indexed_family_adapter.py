@@ -33,6 +33,24 @@ _SET_CHILD_NAMES = {
     "objects", "object", "palette", "remap", "skeleton", "rsrcpool",
 }
 
+# ``amesh_ADEM_PUBLISH`` discards the scanline, texture-present, and Tracy
+# lighten bits before selecting one of ten implemented polygon routines.  Any
+# other remaining combination returns without publishing the polygon.  Keep
+# that source dispatch table explicit so exact indexed mode never invents a
+# rendering interpretation for the nominal flat/line/mapped-TRACY bit space.
+_RETAIL_IGNORED_POLFLAG_BITS = 0x001 | 0x008 | 0x100
+_RETAIL_NNN_CODE = 0x00
+_RETAIL_LINEAR_CODES = frozenset((0x02, 0x32, 0x42, 0x72, 0x82))
+_RETAIL_DEPTH_CODES = frozenset((0x06, 0x36, 0x46, 0x76))
+_RETAIL_GRADIENT_CODES = frozenset((0x32, 0x36, 0x72, 0x76))
+_RETAIL_CLEAR_CODES = frozenset((0x42, 0x46, 0x72, 0x76))
+_RETAIL_FLAT_TRACY_CODE = 0x82
+_RETAIL_MATERIAL_CODES = frozenset(
+    (_RETAIL_NNN_CODE,)
+    + tuple(_RETAIL_LINEAR_CODES)
+    + tuple(_RETAIL_DEPTH_CODES)
+)
+
 
 class IndexedFamilyAdapterError(RuntimeError):
     """Base class for controlled indexed-family diagnostics."""
@@ -374,6 +392,24 @@ def _as_byte(value: Any, label: str) -> int:
     return decoded
 
 
+def _retail_material_code(polflags: Any) -> int:
+    """Return the exact source-dispatch code after its three ignored bits."""
+
+    return int(polflags) & ~_RETAIL_IGNORED_POLFLAG_BITS
+
+
+def _retail_constant_shade_row(raw_shade: int) -> int:
+    """Convert an authored byte to the SHADERMP row used by retail spans.
+
+    The caller handles the source renderer's all-white and all-black polygon
+    optimizations at the two ends of the byte range.  For the remaining
+    constant-brightness range this is the high byte of
+    ``raw_shade * 253 + 0x180``.
+    """
+
+    return (253 * raw_shade + 0x180) >> 8
+
+
 class IndexedFamilyAdapter:
     """Resolve one :class:`AssetFamily` into auditable indexed surfaces."""
 
@@ -473,6 +509,8 @@ class IndexedFamilyAdapter:
         self.block_map: dict[tuple[str, int], Any] = {}
         self.atts_by_polygon: dict[tuple[str, int], dict[int, Any]] = {}
         unsupported: list[str] = []
+        unsupported_codes: list[dict[str, Any]] = []
+        depth_fade_blocks: list[str] = []
         for family_object in self._all_objects():
             owner = str(getattr(family_object, "owner_path", "root"))
             # ViewFace.block_index is assigned from this exact material-group
@@ -500,8 +538,30 @@ class IndexedFamilyAdapter:
                 self.atts_by_polygon[key] = indexed_atts
                 if self._tracy_mode(block) == "mapped":
                     unsupported.append(f"{owner} block {block_index}")
+                material_code = self._material_code(block)
+                if material_code not in _RETAIL_MATERIAL_CODES:
+                    unsupported_codes.append({
+                        "block": f"{owner} block {block_index}",
+                        "raw_polflags": int(getattr(block, "polflags", 0)),
+                        "retail_dispatch_code": material_code,
+                    })
+                if bool(getattr(block, "depth_fade", False)):
+                    depth_fade_blocks.append(f"{owner} block {block_index}")
         self.unsupported_mapped_tracy = tuple(unsupported)
         self.source_info["unsupported_mapped_tracy"] = list(unsupported)
+        self.source_info["unsupported_material_codes"] = unsupported_codes
+        self.source_info["shade_model"] = {
+            "constant_shade_rule": (
+                "raw 0..2 bypass SHADERMP; raw 3..253 uses row "
+                "(253 * raw + 0x180) >> 8; raw 254..255 becomes opaque index 0"
+            ),
+            "depth_fade_emulated": False,
+            "depth_fade_blocks": depth_fade_blocks,
+            "depth_fade_limitation": (
+                "Per-vertex AREA_FLAG_DPTHFADE brightness outside dfade_start "
+                "is not emulated by this bounded close-up renderer."
+            ),
+        }
 
         self._textures_by_name: dict[str, Any] = {}
         basename_candidates: dict[str, Any | None] = {}
@@ -602,26 +662,13 @@ class IndexedFamilyAdapter:
         return list(iterator()) if callable(iterator) else [root]
 
     @staticmethod
-    def _shade_mode(block: Any) -> str:
-        bits = int(getattr(block, "polflags", 0)) & 0x30
-        return {0x00: "none", 0x10: "flat", 0x20: "line", 0x30: "gradient"}[bits]
+    def _material_code(block: Any) -> int:
+        return _retail_material_code(getattr(block, "polflags", 0))
 
     @staticmethod
     def _tracy_mode(block: Any) -> str:
         bits = int(getattr(block, "polflags", 0)) & 0xC0
         return {0x00: "none", 0x40: "clear", 0x80: "flat", 0xC0: "mapped"}[bits]
-
-    @staticmethod
-    def _map_mode(block: Any, textured: bool) -> str:
-        bits = int(getattr(block, "polflags", 0)) & 0x06
-        if bits == 0x06:
-            return "depth"
-        if bits == 0x02 or not textured:
-            return "linear"
-        raise UnsupportedIndexedMaterialError(
-            f"unsupported indexed texture map bits 0x{bits:02x}; "
-            "expected linear (0x02) or depth (0x06)"
-        )
 
     @staticmethod
     def _frame_values(material: Any, frame_index: int) -> tuple[int, int, int]:
@@ -781,23 +828,55 @@ class IndexedFamilyAdapter:
         poly_id = int(getattr(face, "poly_id", -1))
         entry = self.atts_by_polygon.get((owner, block_index), {}).get(poly_id)
 
-        tracy_mode = self._tracy_mode(block)
-        if tracy_mode == "mapped":
+        polflags = int(getattr(block, "polflags", 0))
+        material_code = self._material_code(block)
+        decoded_tracy_mode = self._tracy_mode(block)
+        if decoded_tracy_mode == "mapped":
             message = (
                 f"mapped TRACY is not supported in legacy indexed mode "
                 f"({owner} block {block_index}, polygon {poly_id})"
             )
             self._diagnose_unsupported(message)
             raise UnsupportedIndexedMaterialError(message)
-
-        polflags = int(getattr(block, "polflags", 0))
-        textured = bool(polflags & 0x08)
-        try:
-            map_mode = self._map_mode(block, textured)
-        except UnsupportedIndexedMaterialError as exc:
-            message = f"{exc} ({owner} block {block_index}, polygon {poly_id})"
+        if material_code not in _RETAIL_MATERIAL_CODES:
+            message = (
+                f"unsupported retail polygon flags 0x{polflags:x} "
+                f"(dispatch code 0x{material_code:x}); the source AMESH "
+                f"dispatcher does not publish this combination "
+                f"({owner} block {block_index}, polygon {poly_id})"
+            )
             self._diagnose_unsupported(message)
-            raise UnsupportedIndexedMaterialError(message) from exc
+            raise UnsupportedIndexedMaterialError(message)
+
+        # These modes come from the retail source's dispatch table after it
+        # masks scanline, texture-present, and Tracy-lighten.  In particular,
+        # NNN is the sole nonmapped routine and LNF is the sole flat-TRACY one.
+        textured = material_code != _RETAIL_NNN_CODE
+        map_mode = (
+            "depth" if material_code in _RETAIL_DEPTH_CODES else "linear")
+        tracy_mode = (
+            "flat" if material_code == _RETAIL_FLAT_TRACY_CODE
+            else "clear" if material_code in _RETAIL_CLEAR_CODES
+            else "none"
+        )
+
+        if not textured:
+            # NNN dispatches ZeroSpan: ATTS color/shade fields and any attached
+            # bitmap are ignored, and numeric palette index zero is written as
+            # an ordinary opaque polygon.
+            return self._backend.IndexedSurface(
+                name="palette-index-0",
+                kind="solid",
+                indices=None,
+                width=0,
+                height=0,
+                chroma_by_index=None,
+                solid_index=0,
+                shade_mode="none",
+                shade_value=0,
+                tracy_mode="none",
+                map_mode="linear",
+            )
 
         shade_source = getattr(face, "shade", None)
         if shade_source is None:
@@ -805,28 +884,32 @@ class IndexedFamilyAdapter:
                 getattr(entry, "shade_val", None)
                 if entry is not None else getattr(block, "shade_val", 0)
             )
-        shade_value = _as_byte(shade_source, "shade value")
-        shade_mode = self._shade_mode(block)
-
-        if not textured:
-            color_source = (
-                getattr(entry, "color_val")
-                if entry is not None else getattr(block, "color_val", 0)
-            )
-            solid_index = _as_byte(color_source, "solid color index")
+        raw_shade = _as_byte(shade_source, "shade value")
+        shade_mode = (
+            "gradient" if material_code in _RETAIL_GRADIENT_CODES else "none")
+        shade_value = 0
+        if shade_mode == "gradient" and raw_shade <= 2:
+            # b < 0.01 at every vertex: retail clears its shade flag and uses
+            # the ordinary no-SHADERMP span.
+            shade_mode = "none"
+        elif shade_mode == "gradient" and raw_shade >= 254:
+            # b > 0.99 at every vertex: retail replaces all raster flags with
+            # zero, selecting the opaque ZeroSpan regardless of clear TRACY.
             return self._backend.IndexedSurface(
-                name=f"palette-index-{solid_index}",
+                name="palette-index-0-black-shade",
                 kind="solid",
                 indices=None,
                 width=0,
                 height=0,
                 chroma_by_index=None,
-                solid_index=solid_index,
-                shade_mode=shade_mode,
-                shade_value=shade_value,
-                tracy_mode=tracy_mode,
-                map_mode=map_mode,
+                solid_index=0,
+                shade_mode="none",
+                shade_value=0,
+                tracy_mode="none",
+                map_mode="linear",
             )
+        elif shade_mode == "gradient":
+            shade_value = _retail_constant_shade_row(raw_shade)
 
         name = self._texture_name(block, material, frame_index)
         image = self._find_texture(name)

@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import bisect
 import math
+import operator
 import time
 
 from PySide6.QtCore import (
@@ -81,6 +82,14 @@ VIEW_MODES = (
     "materials",
     "textured",
     "textured_indexed",
+)
+FLAT_TRACY_DESTINATION_MODES = (
+    "live_framebuffer",
+    "forced_diagnostic",
+)
+INDEXED_EFFECTIVE_RENDERERS = (
+    "retail_indexed_reconstructed",
+    "retail_indexed_forced_tracy_diagnostic",
 )
 TEXTURED_VIEW_MODES = ("textured", "textured_indexed")
 VIEW_PRESET_ANGLES = {
@@ -146,6 +155,51 @@ class _RenderPayload:
     image: QImage | None
     front_facing: bool
     uv_mapping_valid: bool
+    source_order: int
+    sort_depth: float
+
+
+def _retail_source_face_front_facing(
+        camera_vertices: tuple[tuple[float, float, float], ...] | list,
+        camera_distance: float = 4.0) -> bool:
+    """Apply retail's pre-clip first-three-vertices visibility test."""
+
+    if len(camera_vertices) < 3:
+        return False
+    points = [
+        (
+            float(vertex[0]),
+            float(vertex[1]),
+            float(camera_distance - vertex[2]),
+        )
+        for vertex in camera_vertices[:3]
+    ]
+    first = tuple(points[1][axis] - points[0][axis] for axis in range(3))
+    second = tuple(points[2][axis] - points[1][axis] for axis in range(3))
+    normal = (
+        first[1] * second[2] - first[2] * second[1],
+        first[2] * second[0] - first[0] * second[2],
+        first[0] * second[1] - first[1] * second[0],
+    )
+    visibility = sum(normal[axis] * points[0][axis] for axis in range(3))
+    return visibility >= 0.0
+
+
+def _cardinal_sin_cos(angle_degrees: float) -> tuple[float, float]:
+    """Return stable trig values for the viewer's exact cardinal presets."""
+
+    radians = math.radians(angle_degrees)
+    sine = math.sin(radians)
+    cosine = math.cos(radians)
+    if abs(sine) < 1e-12:
+        sine = 0.0
+    elif abs(abs(sine) - 1.0) < 1e-12:
+        sine = math.copysign(1.0, sine)
+    if abs(cosine) < 1e-12:
+        cosine = 0.0
+    elif abs(abs(cosine) - 1.0) < 1e-12:
+        cosine = math.copysign(1.0, cosine)
+    return sine, cosine
 
 
 @dataclass
@@ -434,6 +488,7 @@ class AssetViewport(QWidget):
     redoRequested = Signal()
     editHint = Signal(str)          # live hint text for the active tool
     animationFrameChanged = Signal(str)
+    indexedPaletteChanged = Signal()
     manualCameraChanged = Signal()  # orbit, pan or zoom changed by the user
     pastePreviewConfirmRequested = Signal()
     pastePreviewActiveChanged = Signal(bool)
@@ -479,6 +534,11 @@ class AssetViewport(QWidget):
         self._last_effective_renderer = "not_rendered"
         self._last_render_fallback_reason = ""
         self._last_render_background = "not_rendered"
+        # Retail clears the frame to palette index zero and flat/LUM-TRACY
+        # reads the live destination.  A forced row is an explicit diagnostic,
+        # never an alternate claim about canonical retail rendering.
+        self._flat_tracy_destination_mode = "live_framebuffer"
+        self._flat_tracy_forced_destination_index = 0
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None
@@ -643,6 +703,7 @@ class AssetViewport(QWidget):
         else:
             self._indexed_adapter, self._indexed_unavailable_reason = (
                 IndexedFamilyAdapter.try_create(family))
+        self.indexedPaletteChanged.emit()
         self._indexed_runtime_error = ""
         self._last_indexed_stats = {}
         self._last_render_requested_mode = "not_rendered"
@@ -2616,14 +2677,126 @@ class AssetViewport(QWidget):
                 33 if mode == "textured_indexed" else 16)
             if mode == "textured_indexed":
                 if self._indexed_adapter is not None:
-                    self.statusMessage.emit(
-                        "Retail indexed renderer active (reconstructed "
-                        "SHADERMP/TRACYRMP path).")
+                    if self._flat_tracy_destination_mode == "live_framebuffer":
+                        self.statusMessage.emit(
+                            "Retail indexed renderer active (reconstructed "
+                            "SHADERMP/TRACYRMP path; live framebuffer).")
+                    else:
+                        self.statusMessage.emit(
+                            "Retail indexed diagnostic active: flat/LUM-TRACY "
+                            "is forced to palette destination "
+                            f"{self._flat_tracy_forced_destination_index}.")
                 else:
                     self.statusMessage.emit(
                         "Retail indexed renderer unavailable; using OpenUA "
                         f"preview fallback: {self._indexed_unavailable_reason}")
             self.update()
+
+    def _invalidate_last_render_metadata(self) -> None:
+        """Drop provenance for a frame invalidated by a render setting."""
+
+        self._last_render_requested_mode = "not_rendered"
+        self._last_effective_renderer = "not_rendered"
+        self._last_render_fallback_reason = ""
+        self._last_render_background = "not_rendered"
+        self._last_indexed_stats = {}
+
+    def set_flat_tracy_destination_mode(self, mode: str) -> None:
+        """Select live retail TRACY or an explicitly forced diagnostic row."""
+
+        if mode not in FLAT_TRACY_DESTINATION_MODES:
+            raise ValueError(
+                "flat TRACY destination mode must be live_framebuffer or "
+                "forced_diagnostic")
+        if mode == self._flat_tracy_destination_mode:
+            return
+        self._flat_tracy_destination_mode = mode
+        self._invalidate_last_render_metadata()
+        if mode == "live_framebuffer":
+            self.statusMessage.emit(
+                "Flat/LUM-TRACY uses the live framebuffer (retail behavior; "
+                "initial clear index 0).")
+        else:
+            self.statusMessage.emit(
+                "Flat/LUM-TRACY destination is forced to palette index "
+                f"{self._flat_tracy_forced_destination_index} for diagnostic "
+                "rendering; this is not canonical retail compositing.")
+        self.update()
+
+    def set_flat_tracy_forced_destination_index(self, value: int) -> None:
+        """Set the diagnostic TRACY table row without inferring it from RGB."""
+
+        if isinstance(value, bool):
+            raise TypeError("flat TRACY destination index must be an integer")
+        try:
+            index = operator.index(value)
+        except TypeError as exc:
+            raise TypeError(
+                "flat TRACY destination index must be an integer") from exc
+        if not 0 <= index <= 255:
+            raise ValueError(
+                "flat TRACY destination index must be between 0 and 255")
+        if index == self._flat_tracy_forced_destination_index:
+            return
+        self._flat_tracy_forced_destination_index = index
+        self._invalidate_last_render_metadata()
+        if self._flat_tracy_destination_mode == "forced_diagnostic":
+            self.statusMessage.emit(
+                "Diagnostic flat/LUM-TRACY destination set to palette index "
+                f"{index}.")
+        self.update()
+
+    @property
+    def flat_tracy_destination_mode(self) -> str:
+        return self._flat_tracy_destination_mode
+
+    @property
+    def flat_tracy_destination_index(self) -> int:
+        """Selected diagnostic row, retained while live mode is active."""
+
+        return self._flat_tracy_forced_destination_index
+
+    @property
+    def flat_tracy_forced_destination_index(self) -> int | None:
+        if self._flat_tracy_destination_mode == "forced_diagnostic":
+            return self._flat_tracy_forced_destination_index
+        return None
+
+    def _indexed_display_rgb(self, index: int) -> tuple[int, int, int] | None:
+        adapter = self._indexed_adapter
+        tables = getattr(adapter, "tables", None)
+        palette = getattr(tables, "display_palette", None)
+        if palette is None or not 0 <= index < len(palette):
+            return None
+        return tuple(int(channel) for channel in palette[index])
+
+    def _indexed_raw_palette_rgb(
+        self, index: int) -> tuple[int, int, int] | None:
+        adapter = self._indexed_adapter
+        tables = getattr(adapter, "tables", None)
+        palette = getattr(tables, "palette", None)
+        if palette is None or not 0 <= index < len(palette):
+            return None
+        return tuple(int(channel) for channel in palette[index])
+
+    @property
+    def flat_tracy_destination_display_rgb(
+            self) -> tuple[int, int, int] | None:
+        return self._indexed_display_rgb(
+            self._flat_tracy_forced_destination_index)
+
+    @property
+    def flat_tracy_destination_raw_rgb(
+            self) -> tuple[int, int, int] | None:
+        return self._indexed_raw_palette_rgb(
+            self._flat_tracy_forced_destination_index)
+
+    @property
+    def flat_tracy_forced_destination_rgb(
+            self) -> tuple[int, int, int] | None:
+        if self.flat_tracy_forced_destination_index is None:
+            return None
+        return self.flat_tracy_destination_display_rgb
 
     @property
     def view_mode(self) -> str:
@@ -2652,6 +2825,10 @@ class AssetViewport(QWidget):
         )
         fallback_used = self._last_effective_renderer == (
             "openua_preview_fallback")
+        initial_rgb = self._indexed_display_rgb(0)
+        selected_rgb = self.flat_tracy_destination_display_rgb
+        raw_rgb = self.flat_tracy_destination_raw_rgb
+        forced_index = self.flat_tracy_forced_destination_index
         info = {
             "available": bool(resources_available and not self._indexed_runtime_error),
             "resources_available": resources_available,
@@ -2665,6 +2842,28 @@ class AssetViewport(QWidget):
             "acceleration_backend": IndexedRasterizer.acceleration_backend,
             "max_safe_pixels": IndexedRasterizer.max_safe_pixels,
             "background_mode": self._last_render_background,
+            "presentation_background_mode": self._last_render_background,
+            "initial_framebuffer_index": 0,
+            "initial_framebuffer_rgb": (
+                list(initial_rgb) if initial_rgb is not None else None),
+            "flat_tracy_destination_mode": (
+                self._flat_tracy_destination_mode),
+            "flat_tracy_selected_destination_index": (
+                self._flat_tracy_forced_destination_index),
+            "flat_tracy_forced_destination_index": forced_index,
+            "flat_tracy_forced_destination_rgb": (
+                list(selected_rgb)
+                if forced_index is not None and selected_rgb is not None
+                else None),
+            "flat_tracy_selected_display_rgb": (
+                list(selected_rgb) if selected_rgb is not None else None),
+            "flat_tracy_selected_raw_palette_rgb": (
+                list(raw_rgb) if raw_rgb is not None else None),
+            "canonical_retail_configuration": (
+                self._flat_tracy_destination_mode == "live_framebuffer"),
+            "source_faithful_frame_clear": True,
+            "source_faithful_flat_destination_reads": (
+                self._flat_tracy_destination_mode == "live_framebuffer"),
             "last_render_stats": dict(self._last_indexed_stats),
         }
         if self._indexed_adapter is not None:
@@ -2732,6 +2931,10 @@ class AssetViewport(QWidget):
                 "show_owner_bbox": self._show_owner_bbox,
                 "mapping_diagnostics": self._mapping_diagnostics,
                 "show_diag_overlay": self._show_diag_overlay,
+                "flat_tracy_destination_mode": (
+                    self._flat_tracy_destination_mode),
+                "flat_tracy_forced_destination_index": (
+                    self._flat_tracy_forced_destination_index),
             }
             self._snapshot_current_camera = camera.copy()
             self._snapshot_current_camera["pan"] = QPointF(camera["pan"])
@@ -2766,6 +2969,10 @@ class AssetViewport(QWidget):
             self._show_owner_bbox = state["show_owner_bbox"]
             self._mapping_diagnostics = state["mapping_diagnostics"]
             self._show_diag_overlay = state["show_diag_overlay"]
+            self._flat_tracy_destination_mode = state[
+                "flat_tracy_destination_mode"]
+            self._flat_tracy_forced_destination_index = state[
+                "flat_tracy_forced_destination_index"]
         # The snapshot's renderer/hash metadata describes the temporary
         # camera and mode, not the restored workspace.  Leave no stale exact
         # claim visible while the normal viewport awaits its next repaint.
@@ -2911,7 +3118,7 @@ class AssetViewport(QWidget):
             painter.end()
         if self._mode == "textured_indexed" \
                 and self._last_effective_renderer \
-                != "retail_indexed_reconstructed":
+                not in INDEXED_EFFECTIVE_RENDERERS:
             reason = (
                 self._last_render_fallback_reason
                 or self.indexed_rendering_reason
@@ -3205,12 +3412,12 @@ class AssetViewport(QWidget):
         y = -(point[1] - center[1]) * scale  # UA -Y is up
         z = (point[2] - center[2]) * scale
 
-        yaw = math.radians(camera["yaw"])
-        pitch = math.radians(camera["pitch"])
-        xz_x = x * math.cos(yaw) + z * math.sin(yaw)
-        xz_z = -x * math.sin(yaw) + z * math.cos(yaw)
-        yz_y = y * math.cos(pitch) - xz_z * math.sin(pitch)
-        yz_z = y * math.sin(pitch) + xz_z * math.cos(pitch)
+        yaw_sin, yaw_cos = _cardinal_sin_cos(camera["yaw"])
+        pitch_sin, pitch_cos = _cardinal_sin_cos(camera["pitch"])
+        xz_x = x * yaw_cos + z * yaw_sin
+        xz_z = -x * yaw_sin + z * yaw_cos
+        yz_y = y * pitch_cos - xz_z * pitch_sin
+        yz_z = y * pitch_sin + xz_z * pitch_cos
         return (xz_x, yz_y, yz_z)
 
     def _project(self, camera_point, target: QRectF | None = None,
@@ -3313,11 +3520,15 @@ class AssetViewport(QWidget):
                     for vertex in piece.vertices
                 ),
                 surface=surface,
+                source_order=int(payload.source_order),
+                sort_depth=float(payload.sort_depth),
             ))
 
         result = IndexedRasterizer.render(
             width, height, indexed_pieces, adapter.tables,
-            background_index=0)
+            background_index=0,
+            flat_tracy_destination_override=(
+                self.flat_tracy_forced_destination_index))
         rgba = result.to_rgba(
             adapter.tables, transparent_background=True)
         image = QImage(
@@ -3371,11 +3582,8 @@ class AssetViewport(QWidget):
             self._last_indexed_stats = {}
         if background is None:
             self._last_render_background = "transparent_or_viewer_default"
-        elif QColor(background) == QColor(0, 0, 0):
-            self._last_render_background = "palette_index_0_black"
         else:
-            self._last_render_background = (
-                "rgb_post_composite_over_palette_index_0")
+            self._last_render_background = "rgb_presentation_post_composite"
         if mode == "textured_indexed":
             self._last_effective_renderer = "openua_preview_fallback"
             self._last_render_fallback_reason = (
@@ -3517,7 +3725,7 @@ class AssetViewport(QWidget):
             # paint exact back-to-front pieces without a hardware depth buffer.
             triangles: list[CameraPolygon] = []
             source_order = 0
-            for face in self._faces:
+            for face_order, face in enumerate(self._faces):
                 if (not clean and not face.mapped
                         and not self._mapping_diagnostics):
                     continue
@@ -3536,6 +3744,19 @@ class AssetViewport(QWidget):
                     uv_mapping_valid = False
                     face_uvs = [(0.0, 0.0)] * len(cam)
                     image = None
+                indexed_face_front_facing = None
+                if mode == "textured_indexed" and len(cam) >= 3:
+                    # Retail culls the complete source polygon from its first
+                    # three transformed vertices before clipping or scan
+                    # conversion.  Do not let a later fan triangle resurrect
+                    # the reverse side. This also normally selects one member
+                    # of an authored reverse-winding card pair even when the
+                    # preview cull toggle is disabled; source-compatible
+                    # exactly edge-on faces may still pass the >= 0 test.
+                    indexed_face_front_facing = (
+                        _retail_source_face_front_facing(cam))
+                    if not indexed_face_front_facing:
+                        continue
                 for index in range(2, len(cam)):
                     indices = (0, index, index - 1)
                     tri_camera = tuple(cam[item] for item in indices)
@@ -3560,14 +3781,20 @@ class AssetViewport(QWidget):
                         * tri_screen[item].y()
                         for item in range(3)
                     )
-                    front_facing = area >= 0.0
-                    if self._backface_cull and not front_facing:
+                    front_facing = (
+                        indexed_face_front_facing
+                        if indexed_face_front_facing is not None
+                        else area >= 0.0)
+                    if (mode != "textured_indexed"
+                            and self._backface_cull and not front_facing):
                         continue
                     triangles.append(CameraPolygon(
                         clipped.vertices,
                         clipped.attributes,
                         _RenderPayload(
-                            face, image, front_facing, uv_mapping_valid),
+                            face, image, front_facing, uv_mapping_valid,
+                            face_order,
+                            max(4.0 - point[2] for point in cam)),
                         source_order,
                     ))
                     source_order += 1
@@ -3607,7 +3834,10 @@ class AssetViewport(QWidget):
                         painter.drawImage(target.topLeft(), indexed_image)
                         indexed_active = True
                         self._last_effective_renderer = (
-                            "retail_indexed_reconstructed")
+                            "retail_indexed_reconstructed"
+                            if self._flat_tracy_destination_mode
+                            == "live_framebuffer"
+                            else "retail_indexed_forced_tracy_diagnostic")
                         self._last_render_fallback_reason = ""
                     else:
                         self._last_effective_renderer = (
