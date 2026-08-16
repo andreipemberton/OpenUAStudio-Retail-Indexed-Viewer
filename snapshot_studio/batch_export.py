@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import operator
 import os
 import re
 import time
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from assembly_viewer import (
     AssetViewport,
+    INDEXED_EFFECTIVE_RENDERERS,
     TEXTURED_VIEW_MODES,
     VIEW_PRESET_ANGLES,
 )
@@ -57,6 +59,10 @@ _ZIP_IMAGE_STATUSES = {
     "WRITTEN",
     "EXISTS",
     "ERROR_EXISTING_RETAINED",
+}
+_FLAT_TRACY_DESTINATION_MODES = {
+    "live_framebuffer": "canonical",
+    "forced_diagnostic": "diagnostic",
 }
 
 
@@ -101,6 +107,14 @@ class BatchManifestRow:
     shadermp_sha256: str
     tracyrmp_sha256: str
     index_buffer_sha256: str
+    requested_flat_tracy_destination_mode: str
+    requested_flat_tracy_forced_destination_index: int | None
+    effective_flat_tracy_destination_mode: str
+    effective_flat_tracy_destination_class: str
+    effective_flat_tracy_forced_destination_index: int | None
+    effective_initial_framebuffer_index: int | None
+    effective_initial_framebuffer_rgb: str
+    effective_flat_tracy_forced_destination_rgb: str
 
 
 def safe_component(value: str, fallback: str = "unnamed",
@@ -137,6 +151,72 @@ def file_sha256(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _manifest_palette_index(value) -> int | None:
+    """Normalize a renderer palette index without accepting booleans."""
+
+    if isinstance(value, bool):
+        return None
+    try:
+        index = operator.index(value)
+    except TypeError:
+        return None
+    return index if 0 <= index <= 255 else None
+
+
+def _manifest_rgb_hex(value) -> str:
+    """Return a stable manifest color string for an RGB triplet."""
+
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return ""
+    try:
+        rgb = tuple(int(channel) for channel in value)
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    if not all(0 <= channel <= 255 for channel in rgb):
+        return ""
+    return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
+
+
+def _requested_destination_profile(
+        renderer_mode: str, destination_mode: str,
+        forced_index) -> dict[str, object]:
+    """Return the normalized renderer/destination profile for a batch."""
+
+    renderer_mode = str(renderer_mode)
+    if renderer_mode != "textured_indexed":
+        return {
+            "renderer_mode": renderer_mode,
+            "flat_tracy_destination_mode": None,
+            "flat_tracy_forced_destination_index": None,
+        }
+    destination_mode = str(destination_mode)
+    if destination_mode not in _FLAT_TRACY_DESTINATION_MODES:
+        destination_mode = "live_framebuffer"
+    normalized_index = None
+    if destination_mode == "forced_diagnostic":
+        normalized_index = _manifest_palette_index(forced_index)
+        if normalized_index is None:
+            normalized_index = 0
+    return {
+        "renderer_mode": renderer_mode,
+        "flat_tracy_destination_mode": destination_mode,
+        "flat_tracy_forced_destination_index": normalized_index,
+    }
+
+
+def _destination_profile_label(profile: dict[str, object]) -> str:
+    """Return a concise human-readable label for collision messages."""
+
+    renderer_mode = str(profile.get("renderer_mode", "unknown"))
+    if renderer_mode != "textured_indexed":
+        return renderer_mode
+    mode = profile.get("flat_tracy_destination_mode")
+    if mode == "forced_diagnostic":
+        index = profile.get("flat_tracy_forced_destination_index")
+        return f"Retail Indexed / forced diagnostic row {index}"
+    return "Retail Indexed / live framebuffer (canonical)"
+
+
 class VPSnapshotBatchPanel(QGroupBox):
     """Compact controller embedded below the normal Snapshot tools."""
 
@@ -164,6 +244,8 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._started_at = 0.0
         self._last_setbas_path = ""
         self._renderer_mode = "textured"
+        self._flat_tracy_destination_mode = "live_framebuffer"
+        self._flat_tracy_forced_destination_index = 0
         self._batch_viewport: AssetViewport | None = None
         self._active_source_key: tuple[str, int] | None = None
 
@@ -367,6 +449,18 @@ class VPSnapshotBatchPanel(QGroupBox):
             if renderer_combo is not None else "textured")
         if self._renderer_mode not in TEXTURED_VIEW_MODES:
             self._renderer_mode = "textured"
+        self._capture_flat_tracy_destination_settings()
+        collision_reason = self._skip_existing_profile_collision_reason()
+        if collision_reason:
+            QMessageBox.warning(
+                self,
+                "Cannot safely skip existing snapshots",
+                f"{collision_reason}\n\n"
+                "Choose a separate output folder, or clear Skip existing "
+                "to overwrite this folder intentionally.",
+            )
+            self.status_label.setText("Destination profile mismatch.")
+            return
 
         self._set_running(True)
         self.status_label.setText("Scanning SET.BAS...")
@@ -439,11 +533,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self.progress.setRange(0, len(self._queue))
         self.progress.setValue(0)
 
-        self._batch_viewport = AssetViewport(self)
-        self._batch_viewport.set_mode(self._renderer_mode)
-        self._batch_viewport.begin_snapshot_mode(None)
-        self._batch_viewport.play_animation(False)
-        self._batch_viewport.set_snapshot_guides_visible(False)
+        self._batch_viewport = self._create_batch_viewport()
         self._active_source_key = None
 
         self.window.statusBar().showMessage(
@@ -451,6 +541,121 @@ class VPSnapshotBatchPanel(QGroupBox):
             f"{len(views)} views.")
         self.status_label.setText("Starting...")
         QTimer.singleShot(0, self._step)
+
+    def _capture_flat_tracy_destination_settings(self) -> None:
+        """Freeze the visible destination controls for the whole batch."""
+
+        source_viewport = getattr(self.window, "viewport", None)
+        requested_mode = str(getattr(
+            source_viewport,
+            "flat_tracy_destination_mode",
+            "live_framebuffer",
+        ))
+        if requested_mode not in _FLAT_TRACY_DESTINATION_MODES:
+            requested_mode = "live_framebuffer"
+        self._flat_tracy_destination_mode = requested_mode
+        requested_index = getattr(
+            source_viewport, "flat_tracy_forced_destination_index", 0)
+        self._flat_tracy_forced_destination_index = (
+            _manifest_palette_index(requested_index) or 0)
+
+    def _create_batch_viewport(self) -> AssetViewport:
+        """Create a hidden renderer with the batch-start settings frozen."""
+
+        viewport = AssetViewport(self)
+        viewport.set_mode(self._renderer_mode)
+        viewport.set_flat_tracy_forced_destination_index(
+            self._flat_tracy_forced_destination_index)
+        viewport.set_flat_tracy_destination_mode(
+            self._flat_tracy_destination_mode)
+        viewport.begin_snapshot_mode(None)
+        viewport.play_animation(False)
+        viewport.set_snapshot_guides_visible(False)
+        return viewport
+
+    def _skip_existing_profile_collision_reason(self) -> str:
+        """Reject unsafe Skip-existing reuse across renderer profiles."""
+
+        if not self.skip_existing_check.isChecked() or self._root is None:
+            return ""
+        has_png = False
+        for _directory, _children, filenames in os.walk(
+                self._root, followlinks=False):
+            if any(name.lower().endswith(".png") for name in filenames):
+                has_png = True
+                break
+        if not has_png:
+            return ""
+
+        run_info_path = self._root / "run_info.json"
+        if not run_info_path.is_file():
+            return (
+                "The selected folder already contains PNG files but has no "
+                "run_info.json proving their renderer destination profile."
+            )
+        try:
+            existing_info = json.loads(
+                run_info_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return (
+                "The selected folder contains PNG files, but its "
+                f"run_info.json cannot be verified ({exc})."
+            )
+        if not isinstance(existing_info, dict):
+            return (
+                "The selected folder contains PNG files, but run_info.json "
+                "does not contain a verifiable batch record."
+            )
+
+        renderer_mode = existing_info.get("renderer_mode")
+        if not isinstance(renderer_mode, str) or not renderer_mode:
+            return (
+                "The selected folder contains PNG files, but run_info.json "
+                "does not identify their renderer mode."
+            )
+        destination_mode = existing_info.get(
+            "indexed_flat_tracy_destination_mode_requested")
+        forced_index = existing_info.get(
+            "indexed_flat_tracy_forced_destination_index_requested")
+        if renderer_mode == "textured_indexed":
+            summary = existing_info.get("renderer_summary")
+            if not isinstance(summary, dict):
+                summary = {}
+            if destination_mode is None:
+                destination_mode = summary.get(
+                    "requested_flat_tracy_destination_mode")
+            if forced_index is None:
+                forced_index = summary.get(
+                    "requested_flat_tracy_forced_destination_index")
+            if destination_mode not in _FLAT_TRACY_DESTINATION_MODES:
+                return (
+                    "The selected folder contains indexed PNG files, but "
+                    "run_info.json does not prove their flat-TRACY "
+                    "destination mode."
+                )
+            if destination_mode == "forced_diagnostic" \
+                    and _manifest_palette_index(forced_index) is None:
+                return (
+                    "The selected folder contains forced-diagnostic PNG "
+                    "files, but run_info.json has no valid forced palette "
+                    "destination index."
+                )
+
+        existing_profile = _requested_destination_profile(
+            renderer_mode, destination_mode, forced_index)
+        requested_profile = _requested_destination_profile(
+            self._renderer_mode,
+            self._flat_tracy_destination_mode,
+            self._flat_tracy_forced_destination_index,
+        )
+        if existing_profile != requested_profile:
+            return (
+                "The selected folder contains snapshots from "
+                f"{_destination_profile_label(existing_profile)}, while "
+                "this batch requests "
+                f"{_destination_profile_label(requested_profile)}."
+            )
+        return ""
 
     def _build_sources(self, vp_entries, archive, family) -> list[SnapshotSource]:
         """Build one deterministic corpus entry per VP plus extra SKLT."""
@@ -835,6 +1040,14 @@ class VPSnapshotBatchPanel(QGroupBox):
             renderer["shadermp_sha256"],
             renderer["tracyrmp_sha256"],
             renderer["index_buffer_sha256"],
+            renderer["requested_flat_tracy_destination_mode"],
+            renderer["requested_flat_tracy_forced_destination_index"],
+            renderer["effective_flat_tracy_destination_mode"],
+            renderer["effective_flat_tracy_destination_class"],
+            renderer["effective_flat_tracy_forced_destination_index"],
+            renderer["effective_initial_framebuffer_index"],
+            renderer["effective_initial_framebuffer_rgb"],
+            renderer["effective_flat_tracy_forced_destination_rgb"],
         ))
 
     def _renderer_manifest_fields(
@@ -897,6 +1110,51 @@ class VPSnapshotBatchPanel(QGroupBox):
             renderer_info.get("last_render_stats", {})
             if indexed_attempt and rendered_output else {}
         )
+        exact_indexed_output = (
+            rendered_output
+            and requested == "retail_indexed_reconstructed"
+            and isinstance(renderer_info, dict)
+            and effective in INDEXED_EFFECTIVE_RENDERERS
+            and not fallback
+        )
+        requested_profile = _requested_destination_profile(
+            getattr(self, "_renderer_mode", "textured"),
+            getattr(
+                self, "_flat_tracy_destination_mode", "live_framebuffer"),
+            getattr(self, "_flat_tracy_forced_destination_index", 0),
+        )
+        requested_destination_mode = (
+            str(requested_profile["flat_tracy_destination_mode"])
+            if requested == "retail_indexed_reconstructed" else ""
+        )
+        requested_forced_index = (
+            requested_profile["flat_tracy_forced_destination_index"]
+            if requested == "retail_indexed_reconstructed" else None
+        )
+        effective_destination_mode = ""
+        effective_destination_class = ""
+        effective_forced_index = None
+        effective_initial_index = None
+        effective_initial_rgb = ""
+        effective_forced_rgb = ""
+        if exact_indexed_output:
+            candidate_mode = str(
+                renderer_info.get("flat_tracy_destination_mode", ""))
+            if candidate_mode in _FLAT_TRACY_DESTINATION_MODES:
+                effective_destination_mode = candidate_mode
+                effective_destination_class = (
+                    _FLAT_TRACY_DESTINATION_MODES[candidate_mode])
+                effective_initial_index = _manifest_palette_index(
+                    renderer_info.get("initial_framebuffer_index"))
+                effective_initial_rgb = _manifest_rgb_hex(
+                    renderer_info.get("initial_framebuffer_rgb"))
+                if candidate_mode == "forced_diagnostic":
+                    effective_forced_index = _manifest_palette_index(
+                        renderer_info.get(
+                            "flat_tracy_forced_destination_index"))
+                    effective_forced_rgb = _manifest_rgb_hex(
+                        renderer_info.get(
+                            "flat_tracy_forced_destination_rgb"))
         return {
             "requested_renderer": requested,
             "effective_renderer": effective,
@@ -910,6 +1168,20 @@ class VPSnapshotBatchPanel(QGroupBox):
                 sources.get("tracy", {}).get("sha256", "")),
             "index_buffer_sha256": str(
                 stats.get("index_buffer_sha256", "")),
+            "requested_flat_tracy_destination_mode": (
+                requested_destination_mode),
+            "requested_flat_tracy_forced_destination_index": (
+                requested_forced_index),
+            "effective_flat_tracy_destination_mode": (
+                effective_destination_mode),
+            "effective_flat_tracy_destination_class": (
+                effective_destination_class),
+            "effective_flat_tracy_forced_destination_index": (
+                effective_forced_index),
+            "effective_initial_framebuffer_index": effective_initial_index,
+            "effective_initial_framebuffer_rgb": effective_initial_rgb,
+            "effective_flat_tracy_forced_destination_rgb": (
+                effective_forced_rgb),
         }
 
     def _write_manifests(self, cancelled: bool) -> None:
@@ -976,6 +1248,15 @@ class VPSnapshotBatchPanel(QGroupBox):
             getattr(self.window, "_setbas", None),
             "path", "",
         ))
+        requested_profile = _requested_destination_profile(
+            self._renderer_mode,
+            self._flat_tracy_destination_mode,
+            self._flat_tracy_forced_destination_index,
+        )
+        requested_destination_mode = requested_profile[
+            "flat_tracy_destination_mode"]
+        requested_forced_index = requested_profile[
+            "flat_tracy_forced_destination_index"]
         renderer_summary = {
             "requested_renderer": (
                 "retail_indexed_reconstructed"
@@ -987,6 +1268,55 @@ class VPSnapshotBatchPanel(QGroupBox):
             "fallback_written_rows": sum(
                 1 for row in self._rows
                 if row.status == "WRITTEN" and row.fallback_used),
+            "requested_flat_tracy_destination_mode": (
+                requested_destination_mode
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "requested_flat_tracy_destination_class": (
+                _FLAT_TRACY_DESTINATION_MODES[
+                    str(requested_destination_mode)]
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "requested_flat_tracy_forced_destination_index": (
+                requested_forced_index
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "verified_written_flat_tracy_destination_profiles": [
+                {
+                    "mode": mode,
+                    "class": mode_class,
+                    "initial_framebuffer_index": initial_index,
+                    "forced_destination_index": forced_index,
+                }
+                for (
+                    mode,
+                    mode_class,
+                    initial_index,
+                    forced_index,
+                ) in sorted({
+                    (
+                        row.effective_flat_tracy_destination_mode,
+                        row.effective_flat_tracy_destination_class,
+                        row.effective_initial_framebuffer_index,
+                        row.effective_flat_tracy_forced_destination_index,
+                    )
+                    for row in self._rows
+                    if row.status == "WRITTEN"
+                    and row.effective_flat_tracy_destination_mode
+                }, key=lambda profile: tuple(
+                    "" if value is None else str(value)
+                    for value in profile))
+            ],
+            "destination_profile_output_collision_warning": (
+                "Destination mode/index changes do not alter image filenames. "
+                "Skip-existing resume is permitted only when run_info.json "
+                "proves the same renderer/destination profile; otherwise use "
+                "a separate output folder or overwrite intentionally."
+            ),
+            "skip_existing_collision_policy": (
+                "populated_output_requires_matching_run_info_renderer_and_"
+                "destination_profile"
+            ),
             "source_profiles": [
                 {
                     "palette_sha256": palette,
@@ -999,7 +1329,10 @@ class VPSnapshotBatchPanel(QGroupBox):
                 "Only WRITTEN rows contribute effective renderer counts and "
                 "source profiles. EXISTS and ERROR_EXISTING_RETAINED files "
                 "are retained but not renderer-verified; per-image provenance "
-                "is authoritative in manifest.json"
+                "is authoritative in manifest.json. Destination mode/index "
+                "changes do not alter filenames; Skip existing refuses a "
+                "populated folder unless its prior run_info proves the same "
+                "renderer/destination profile"
             ),
         }
         if attempted_source_profiles:
@@ -1035,6 +1368,14 @@ class VPSnapshotBatchPanel(QGroupBox):
             "guides": False,
             "animation_frame": "initial/reset",
             "renderer_mode": self._renderer_mode,
+            "indexed_flat_tracy_destination_mode_requested": (
+                requested_destination_mode
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "indexed_flat_tracy_forced_destination_index_requested": (
+                requested_forced_index
+                if self._renderer_mode == "textured_indexed" else None
+            ),
             "renderer_summary": renderer_summary,
             "written": self._written,
             "existing": self._existing,

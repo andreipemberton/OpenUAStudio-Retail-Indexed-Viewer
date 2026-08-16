@@ -48,6 +48,8 @@ Point3 = tuple[float, float, float]
 
 
 def _u8(value, label: str) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{label} must contain integers, not booleans")
     try:
         converted = operator.index(value)
     except TypeError as exc:
@@ -231,7 +233,11 @@ class IndexedTables:
     exposed through named lookup methods:
 
     ``shader[shade_value][source_index]`` and
-    ``tracy[source_index][destination_index]``.
+    ``tracy[background_index][source_index]``.
+
+    The latter axis order is not an inference from table shape.  The original
+    x86 and 68k ``span_lnf`` implementations form the byte offset as
+    ``(background << 8) | raw_texture_texel``.
     """
 
     palette: tuple[RGB, ...]
@@ -263,8 +269,8 @@ class IndexedTables:
 
         These checks are intentionally independent of NumPy and avoid the
         data-set-specific full-table asymmetry count used by the forensic
-        renderer.  They still pin both axes, protected destinations, known
-        asymmetric cells, and non-commutative layer order.
+        renderer.  They still pin both axes, special source/background
+        behaviour, known asymmetric cells, and non-commutative layer order.
         """
 
         shader = self.shader_pixels
@@ -289,26 +295,27 @@ class IndexedTables:
                     "SHADERMP UA profile failed at unshaded row 0, source "
                     f"{source}: {actual} != {expected}")
 
-        if any(tracy[13 * 256 + destination] != destination
-               for destination in range(256)):
+        if any(tracy[13 * 256 + source] != source
+               for source in range(256)):
             raise ValueError(
-                "TRACYRMP UA profile failed: source row 13 must be "
-                "destination identity")
+                "TRACYRMP UA profile failed: background row 13 must copy "
+                "the source index")
 
-        for destination in (8, 10, 11, 12, 14, 15):
-            if any(tracy[source * 256 + destination] != destination
-                   for source in range(256)):
+        for source in (8, 10, 11, 12, 14, 15):
+            if any(tracy[background * 256 + source] != source
+                   for background in range(256)):
                 raise ValueError(
-                    "TRACYRMP UA profile failed: protected destination "
-                    f"column {destination} changed")
+                    "TRACYRMP UA profile failed: opaque source column "
+                    f"{source} changed")
 
-        for source in range(256):
-            expected = 0 if source == 13 else source
-            actual = tracy[source * 256]
+        for background in range(256):
+            expected = 0 if background == 13 else background
+            actual = tracy[background * 256]
             if actual != expected:
                 raise ValueError(
-                    "TRACYRMP UA profile failed: destination column 0 at "
-                    f"source {source} is {actual}, expected {expected}")
+                    "TRACYRMP UA profile failed: transparent source column 0 "
+                    f"over background {background} is {actual}, expected "
+                    f"{expected}")
 
         known_cells = {
             (31, 220): 212,
@@ -318,21 +325,21 @@ class IndexedTables:
             (156, 185): 54,
             (159, 185): 106,
         }
-        for (source, destination), expected in known_cells.items():
-            actual = tracy[source * 256 + destination]
+        for (background, source), expected in known_cells.items():
+            actual = tracy[background * 256 + source]
             if actual != expected:
                 raise ValueError(
                     "TRACYRMP UA profile failed at "
-                    f"[{source}][{destination}]: {actual} != {expected}")
+                    f"[{background}][{source}]: {actual} != {expected}")
 
-        first_156 = tracy[156 * 256]
-        first_159 = tracy[159 * 256]
-        layer_156_then_159 = tracy[159 * 256 + first_156]
-        layer_159_then_156 = tracy[156 * 256 + first_159]
-        if (layer_156_then_159, layer_159_then_156) != (63, 140):
+        first_156 = tracy[156]
+        first_159 = tracy[159]
+        layer_156_then_159 = tracy[first_156 * 256 + 159]
+        layer_159_then_156 = tracy[first_159 * 256 + 156]
+        if (layer_156_then_159, layer_159_then_156) != (207, 191):
             raise ValueError(
                 "TRACYRMP UA profile failed: non-commutative 156/159 "
-                "layer-order tripwire did not match (63, 140)")
+                "layer-order tripwire did not match (207, 191)")
         return self
 
     @property
@@ -358,10 +365,10 @@ class IndexedTables:
         source = _u8(source_index, "source index")
         return self.shader_pixels[shade * 256 + source]
 
-    def tracy_index(self, source_index: int, destination_index: int) -> int:
+    def tracy_index(self, background_index: int, source_index: int) -> int:
+        background = _u8(background_index, "TRACY background index")
         source = _u8(source_index, "TRACY source index")
-        destination = _u8(destination_index, "destination index")
-        return self.tracy_pixels[source * 256 + destination]
+        return self.tracy_pixels[background * 256 + source]
 
 
 @dataclass(frozen=True)
@@ -442,6 +449,8 @@ class IndexedPiece:
     uvs: tuple[Point2, ...]
     camera_vertices: tuple[Point3, ...]
     surface: IndexedSurface
+    source_order: int = 0
+    sort_depth: float = 0.0
 
     def __post_init__(self) -> None:
         try:
@@ -452,6 +461,16 @@ class IndexedPiece:
             polygon_id = operator.index(self.polygon_id)
         except TypeError as exc:
             raise TypeError("polygon_id must be an integer") from exc
+        try:
+            source_order = operator.index(self.source_order)
+        except TypeError as exc:
+            raise TypeError("source_order must be an integer") from exc
+        try:
+            sort_depth = float(self.sort_depth)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("sort_depth must be a finite number") from exc
+        if not math.isfinite(sort_depth):
+            raise ValueError("sort_depth must be a finite number")
         if not isinstance(self.surface, IndexedSurface):
             raise TypeError("surface must be an IndexedSurface")
 
@@ -468,6 +487,8 @@ class IndexedPiece:
             raise ValueError("solid UVs must be empty or match the screen polygon")
 
         object.__setattr__(self, "polygon_id", polygon_id)
+        object.__setattr__(self, "source_order", source_order)
+        object.__setattr__(self, "sort_depth", sort_depth)
         object.__setattr__(self, "screen", screen)
         object.__setattr__(self, "uvs", uvs)
         object.__setattr__(self, "camera_vertices", camera)
@@ -541,17 +562,20 @@ _COUNTER_KEYS = (
     "linear_mapped_samples",
     "depth_mapped_samples",
     "source_chroma_skipped",
+    "clear_source_zero_skipped",
     "flat_tracy_samples",
-    "flat_tracy_noop_row13_samples",
+    "flat_tracy_source_zero_samples",
     "flat_tracy_changed_samples",
     "flat_tracy_duplicate_samples_skipped",
+    "transparent_samples_occluded",
     "opaque_or_clear_samples",
 )
 
 
 def _finish_stats(
         counters: Counter, width: int, height: int, pieces,
-        framebuffer, coverage, polygon_owner) -> dict[str, object]:
+        framebuffer, coverage, polygon_owner, initial_framebuffer_index: int,
+        flat_tracy_destination_override: int | None) -> dict[str, object]:
     stats: dict[str, object] = {
         key: int(counters.get(key, 0)) for key in _COUNTER_KEYS
     }
@@ -622,8 +646,24 @@ def _finish_stats(
         "covered_index_zero_pixels": covered_zero_pixels,
         "index_buffer_sha256": hashlib.sha256(raw).hexdigest(),
         "palette_exact_by_construction": True,
+        "initial_framebuffer_index": int(initial_framebuffer_index),
+        "flat_tracy_forced_destination_index": (
+            None if flat_tracy_destination_override is None
+            else int(flat_tracy_destination_override)
+        ),
+        "flat_tracy_destination_mode": (
+            "live_framebuffer"
+            if flat_tracy_destination_override is None
+            else "forced_diagnostic"
+        ),
+        "source_faithful_frame_clear": initial_framebuffer_index == 0,
+        "source_faithful_flat_destination_reads": (
+            flat_tracy_destination_override is None),
+        "canonical_retail_destination_policy": (
+            initial_framebuffer_index == 0
+            and flat_tracy_destination_override is None),
         "shader_lookup_axis_order": "SHADERMP[shade][source]",
-        "tracy_lookup_axis_order": "TRACYRMP[source][destination]",
+        "tracy_lookup_axis_order": "TRACYRMP[background][raw_source]",
         "final_visible_polygon_owners": owners,
     })
     return stats
@@ -654,6 +694,29 @@ def _sample_coordinate(value: float, size: int) -> int:
     return min(size - 1, max(0, coordinate))
 
 
+def _transparent_replay_metadata(schedule) -> dict[str, object]:
+    seen: set[Hashable] = set()
+    faces: list[dict[str, object]] = []
+    for _input_order, piece in schedule:
+        if (piece.surface.tracy_mode == "none"
+                or piece.source_face_id in seen):
+            continue
+        seen.add(piece.source_face_id)
+        faces.append({
+            "polygon_id": int(piece.polygon_id),
+            "tracy_mode": piece.surface.tracy_mode,
+            "publish_depth": float(piece.sort_depth),
+            "source_order_tiebreak": int(piece.source_order),
+        })
+    return {
+        "transparent_replay_rule": (
+            "opaque BSP pass, then source-derived publish-depth descending "
+            "LIFO; "
+            "source order is a deterministic equal-depth tie-break"),
+        "transparent_replay_faces": faces,
+    }
+
+
 class IndexedRasterizer:
     """Stable ordered-piece rasterizer for the retail indexed colour path."""
 
@@ -661,10 +724,44 @@ class IndexedRasterizer:
     max_safe_pixels = MAX_SAFE_PIXELS
 
     @staticmethod
+    def _retail_pass_order(pieces):
+        """Replay transparent source faces after opaque BSP pieces.
+
+        The retail software spangine pushes clear/LUM-TRACY spans while the
+        front-to-back publish pass runs, then pops that glass stack LIFO at
+        ``End3D``.  BSP fragments therefore must not be interleaved as if they
+        were ordinary opaque painter pieces. ``input_order`` is retained for
+        opaque-occlusion gating; ``sort_depth`` reconstructs the whole-face
+        LIFO order which BSP splitting would otherwise destroy, while
+        ``source_order`` is only a deterministic equal-depth tie-break.
+        """
+
+        indexed = list(enumerate(pieces))
+        opaque = [item for item in indexed
+                  if item[1].surface.tracy_mode == "none"]
+        transparent = [item for item in indexed
+                       if item[1].surface.tracy_mode != "none"]
+        transparent.sort(
+            key=lambda item: (
+                item[1].sort_depth, item[1].source_order, item[0]),
+            reverse=True)
+        return opaque + transparent
+
+    @staticmethod
     def render(
             width: int, height: int, pieces: Iterable[IndexedPiece],
             tables: IndexedTables, background_index: int = 0,
+            flat_tracy_destination_override: int | None = None,
             ) -> IndexedRenderResult:
+        """Render an indexed frame, optionally forcing only flat-TRACY reads.
+
+        ``background_index`` initializes the framebuffer.  The optional
+        override is intentionally separate: it substitutes the TRACYRMP row
+        for every flat/LUM-TRACY lookup while output, coverage, and occlusion
+        continue to operate on the real framebuffer.  That override is a
+        diagnostic primitive, not retail live-destination compositing.
+        """
+
         try:
             width = operator.index(width)
             height = operator.index(height)
@@ -675,27 +772,41 @@ class IndexedRasterizer:
         if not isinstance(tables, IndexedTables):
             raise TypeError("tables must be IndexedTables")
         background = _u8(background_index, "background index")
+        forced_destination = (
+            None
+            if flat_tracy_destination_override is None
+            else _u8(
+                flat_tracy_destination_override,
+                "forced TRACY destination index",
+            )
+        )
         ordered = tuple(pieces)
         if not all(isinstance(piece, IndexedPiece) for piece in ordered):
             raise TypeError("pieces must contain only IndexedPiece objects")
 
         if _np is not None:
             return IndexedRasterizer._render_numpy(
-                width, height, ordered, tables, background)
+                width, height, ordered, tables, background,
+                forced_destination)
         return IndexedRasterizer._render_python(
-            width, height, ordered, tables, background)
+            width, height, ordered, tables, background,
+            forced_destination)
 
     @staticmethod
-    def _render_numpy(width, height, pieces, tables, background):
+    def _render_numpy(
+            width, height, pieces, tables, background,
+            forced_tracy_destination):
         framebuffer = _np.full(
             (height, width), background, dtype=_np.uint8)
         coverage = _np.zeros((height, width), dtype=bool)
         polygon_owner = _np.full((height, width), -1, dtype=_np.int64)
+        opaque_order = _np.full((height, width), -1, dtype=_np.int64)
         counters = Counter()
+        schedule = IndexedRasterizer._retail_pass_order(pieces)
 
         flat_face_ids = []
         flat_face_set = set()
-        for piece in pieces:
+        for _input_order, piece in schedule:
             if (piece.surface.tracy_mode == "flat"
                     and piece.source_face_id not in flat_face_set):
                 flat_face_set.add(piece.source_face_id)
@@ -729,7 +840,7 @@ class IndexedRasterizer:
         tracy = _np.frombuffer(
             tables.tracy_pixels, dtype=_np.uint8).reshape(256, 256)
 
-        for piece in pieces:
+        for input_order, piece in schedule:
             counters["ordered_pieces"] += 1
             for index in range(2, len(piece.screen)):
                 # Match the existing viewer's fan orientation.  Barycentric
@@ -744,27 +855,29 @@ class IndexedRasterizer:
                     piece.camera_vertices[item] for item in tri_indices)
                 counters["fan_triangles"] += 1
                 IndexedRasterizer._triangle_numpy(
-                    framebuffer, coverage, polygon_owner,
+                    framebuffer, coverage, polygon_owner, opaque_order,
                     flat_seen, flat_bits.get(piece.source_face_id),
                     None if sparse_seen is None
                     else sparse_seen[piece.source_face_id]
                     if piece.surface.tracy_mode == "flat" else None,
-                    piece, tri_screen, tri_uvs, tri_camera,
-                    shader, tracy, counters,
+                    piece, input_order, tri_screen, tri_uvs, tri_camera,
+                    shader, tracy, counters, forced_tracy_destination,
                 )
 
         stats = _finish_stats(
             counters, width, height, pieces,
-            framebuffer, coverage, polygon_owner)
+            framebuffer, coverage, polygon_owner, background,
+            forced_tracy_destination)
+        stats.update(_transparent_replay_metadata(schedule))
         return IndexedRenderResult(
             width, height, framebuffer, coverage, polygon_owner, stats)
 
     @staticmethod
     def _triangle_numpy(
-            framebuffer, coverage, polygon_owner,
+            framebuffer, coverage, polygon_owner, opaque_order,
             flat_seen, flat_face_bit, sparse_seen,
-            piece, screen, uvs, camera_vertices,
-            shader, tracy, counters):
+            piece, input_order, screen, uvs, camera_vertices,
+            shader, tracy, counters, forced_tracy_destination):
         height, width = framebuffer.shape
         left, right, top, bottom = _triangle_bbox(screen, width, height)
         if left > right or top > bottom:
@@ -800,10 +913,6 @@ class IndexedRasterizer:
             _np.frombuffer(surface.indices, dtype=_np.uint8).reshape(
                 surface.height, surface.width)
             if surface.kind == "texture" else None)
-        chroma = (
-            _np.asarray(surface.chroma_by_index, dtype=bool)
-            if surface.kind == "texture" else None)
-
         for strip_top in range(top, bottom + 1, 64):
             strip_bottom = min(bottom + 1, strip_top + 64)
             grid_y = (
@@ -910,12 +1019,29 @@ class IndexedRasterizer:
                     0, surface.height - 1)
                 raw_source = texture[source_y, source_x]
 
-            # Chroma belongs to the source palette.  It is rejected before
-            # SHADERMP or TRACYRMP, even if either table would map it elsewhere.
-            if surface.kind == "texture":
-                visible = ~chroma[raw_source]
+            # The original ordinary mapped span writes every raw texel.  Its
+            # clear-TRACY sibling skips only numeric source index zero before
+            # SHADERMP; it does not search the palette for a chroma RGB.  The
+            # flat LNF span passes zero through TRACYRMP instead.
+            if surface.kind == "texture" and surface.tracy_mode == "clear":
+                visible = raw_source != 0
                 if not _np.all(visible):
-                    counters["source_chroma_skipped"] += int(
+                    skipped = int(_np.count_nonzero(~visible))
+                    # Retain the old key for manifest compatibility while the
+                    # precise source-derived name records the real predicate.
+                    counters["source_chroma_skipped"] += skipped
+                    counters["clear_source_zero_skipped"] += skipped
+                    destination_y = destination_y[visible]
+                    destination_x = destination_x[visible]
+                    raw_source = raw_source[visible]
+            if not raw_source.size:
+                continue
+
+            if surface.tracy_mode != "none":
+                visible = (
+                    opaque_order[destination_y, destination_x] <= input_order)
+                if not _np.all(visible):
+                    counters["transparent_samples_occluded"] += int(
                         _np.count_nonzero(~visible))
                     destination_y = destination_y[visible]
                     destination_x = destination_x[visible]
@@ -923,16 +1049,21 @@ class IndexedRasterizer:
             if not raw_source.size:
                 continue
 
-            mapped_source = (
-                shader[surface.shade_value, raw_source]
-                if surface.shade_mode != "none" else raw_source)
             if surface.tracy_mode == "flat":
-                destination = framebuffer[destination_y, destination_x]
-                output = tracy[mapped_source, destination]
-                changed = output != destination
+                background = framebuffer[destination_y, destination_x]
+                # Original span_lnf is explicitly "linear mapped, no shade,
+                # remap Tracy": raw texels bypass SHADERMP and index the low
+                # byte of (background << 8) | source.
+                lookup_background = (
+                    background
+                    if forced_tracy_destination is None
+                    else forced_tracy_destination
+                )
+                output = tracy[lookup_background, raw_source]
+                changed = output != background
                 counters["flat_tracy_samples"] += int(output.size)
-                counters["flat_tracy_noop_row13_samples"] += int(
-                    _np.count_nonzero(mapped_source == 13))
+                counters["flat_tracy_source_zero_samples"] += int(
+                    _np.count_nonzero(raw_source == 0))
                 counters["flat_tracy_changed_samples"] += int(
                     _np.count_nonzero(changed))
                 framebuffer[destination_y, destination_x] = output
@@ -945,21 +1076,30 @@ class IndexedRasterizer:
                     sparse_seen.update(
                         (destination_y.astype(_np.int64) * width
                          + destination_x).tolist())
-            else:  # none and clear are both ordinary overwrite modes.
+            else:  # none and clear are both ordinary shaded overwrite modes.
+                mapped_source = (
+                    shader[surface.shade_value, raw_source]
+                    if surface.shade_mode != "none" else raw_source)
                 counters["opaque_or_clear_samples"] += int(mapped_source.size)
                 framebuffer[destination_y, destination_x] = mapped_source
                 coverage[destination_y, destination_x] = True
                 polygon_owner[destination_y, destination_x] = piece.polygon_id
+                if surface.tracy_mode == "none":
+                    opaque_order[destination_y, destination_x] = input_order
 
     @staticmethod
-    def _render_python(width, height, pieces, tables, background):
+    def _render_python(
+            width, height, pieces, tables, background,
+            forced_tracy_destination):
         framebuffer = [[background for _ in range(width)] for _ in range(height)]
         coverage = [[False for _ in range(width)] for _ in range(height)]
         polygon_owner = [[-1 for _ in range(width)] for _ in range(height)]
+        opaque_order = [[-1 for _ in range(width)] for _ in range(height)]
         flat_seen: dict[Hashable, set[int]] = {}
         counters = Counter()
+        schedule = IndexedRasterizer._retail_pass_order(pieces)
 
-        for piece in pieces:
+        for input_order, piece in schedule:
             counters["ordered_pieces"] += 1
             if piece.surface.tracy_mode == "flat":
                 flat_seen.setdefault(piece.source_face_id, set())
@@ -973,20 +1113,24 @@ class IndexedRasterizer:
                     piece.camera_vertices[item] for item in tri_indices)
                 counters["fan_triangles"] += 1
                 IndexedRasterizer._triangle_python(
-                    framebuffer, coverage, polygon_owner,
+                    framebuffer, coverage, polygon_owner, opaque_order,
                     flat_seen.get(piece.source_face_id), piece,
-                    screen, uvs, camera, tables, counters)
+                    input_order, screen, uvs, camera, tables, counters,
+                    forced_tracy_destination)
 
         stats = _finish_stats(
             counters, width, height, pieces,
-            framebuffer, coverage, polygon_owner)
+            framebuffer, coverage, polygon_owner, background,
+            forced_tracy_destination)
+        stats.update(_transparent_replay_metadata(schedule))
         return IndexedRenderResult(
             width, height, framebuffer, coverage, polygon_owner, stats)
 
     @staticmethod
     def _triangle_python(
-            framebuffer, coverage, polygon_owner, face_seen,
-            piece, screen, uvs, camera_vertices, tables, counters):
+            framebuffer, coverage, polygon_owner, opaque_order, face_seen,
+            piece, input_order, screen, uvs, camera_vertices, tables, counters,
+            forced_tracy_destination):
         height = len(framebuffer)
         width = len(framebuffer[0])
         left, right, top, bottom = _triangle_bbox(screen, width, height)
@@ -1067,29 +1211,43 @@ class IndexedRasterizer:
                     source_y = _sample_coordinate(v, surface.height)
                     raw_source = surface.indices[
                         source_y * surface.width + source_x]
-                    if surface.chroma_by_index[raw_source]:
+                    if surface.tracy_mode == "clear" and raw_source == 0:
                         counters["source_chroma_skipped"] += 1
+                        counters["clear_source_zero_skipped"] += 1
                         continue
 
-                mapped_source = (
-                    tables.shade_index(surface.shade_value, raw_source)
-                    if surface.shade_mode != "none" else raw_source)
+                if (surface.tracy_mode != "none"
+                        and opaque_order[y][x] > input_order):
+                    counters["transparent_samples_occluded"] += 1
+                    continue
+
                 if surface.tracy_mode == "flat":
-                    destination = framebuffer[y][x]
-                    output = tables.tracy_index(mapped_source, destination)
+                    background = framebuffer[y][x]
+                    lookup_background = (
+                        background
+                        if forced_tracy_destination is None
+                        else forced_tracy_destination
+                    )
+                    output = tables.tracy_index(
+                        lookup_background, raw_source)
                     counters["flat_tracy_samples"] += 1
-                    if mapped_source == 13:
-                        counters["flat_tracy_noop_row13_samples"] += 1
-                    if output != destination:
+                    if raw_source == 0:
+                        counters["flat_tracy_source_zero_samples"] += 1
+                    if output != background:
                         counters["flat_tracy_changed_samples"] += 1
                         coverage[y][x] = True
                     framebuffer[y][x] = output
                     face_seen.add(pixel_key)
                 else:
+                    mapped_source = (
+                        tables.shade_index(surface.shade_value, raw_source)
+                        if surface.shade_mode != "none" else raw_source)
                     counters["opaque_or_clear_samples"] += 1
                     framebuffer[y][x] = mapped_source
                     coverage[y][x] = True
                     polygon_owner[y][x] = piece.polygon_id
+                    if surface.tracy_mode == "none":
+                        opaque_order[y][x] = input_order
 
 
 __all__ = [

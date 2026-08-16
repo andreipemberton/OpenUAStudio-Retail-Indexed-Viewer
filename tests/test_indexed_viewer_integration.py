@@ -10,7 +10,13 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication
 
-from assembly_viewer import AssetViewport, ViewFace, ViewMaterial
+from assembly_viewer import (
+    AssetViewport,
+    ViewFace,
+    ViewMaterial,
+    _cardinal_sin_cos,
+    _retail_source_face_front_facing,
+)
 from indexed_renderer import (
     IndexedRasterizer,
     IndexedSurface,
@@ -25,13 +31,25 @@ def _tables() -> IndexedTables:
     return IndexedTables(palette, identity, identity)
 
 
+def _destination_tables() -> IndexedTables:
+    palette = tuple((index, index, index) for index in range(256))
+    shader = bytes(range(256)) * 256
+    tracy = bytearray(b"".join(
+        bytes((background,)) * 256 for background in range(256)))
+    tracy[0 * 256 + 5] = 20
+    tracy[13 * 256 + 5] = 70
+    return IndexedTables(palette, shader, bytes(tracy))
+
+
 def _viewport(mapped: bool = True, uvs=None) -> AssetViewport:
     viewport = AssetViewport()
     viewport._backface_cull = False
     viewport._materials = [ViewMaterial("TEST.ILBM")]
     viewport._faces = [ViewFace(
-        vertices=[(-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (0.0, 1.0, 0.0)],
-        uvs=list(uvs if uvs is not None else [(0, 0), (255, 0), (128, 255)]),
+        # Front-facing retail winding. Exact mode enforces whole-face culling
+        # even when the diagnostic preview toggle is disabled.
+        vertices=[(-1.0, -1.0, 0.0), (0.0, 1.0, 0.0), (1.0, -1.0, 0.0)],
+        uvs=list(uvs if uvs is not None else [(0, 0), (128, 255), (255, 0)]),
         material=0,
         poly_id=7,
         mapped=mapped,
@@ -61,6 +79,75 @@ class IndexedViewerIntegrationTests(unittest.TestCase):
         self.assertEqual(info["effective_mode"], "openua_preview_fallback")
         self.assertTrue(info["fallback_used"])
         self.assertIn("missing remaps", info["fallback_reason"])
+
+    def test_default_and_forced_destination_metadata_are_unambiguous(self):
+        viewport = _viewport()
+        tables = _destination_tables()
+        surface = IndexedSurface(
+            "FX2.ILBM", "solid", None, 0, 0, None, 5,
+            "none", 0, "flat", "linear")
+        viewport._indexed_adapter = SimpleNamespace(
+            source_info={}, tables=tables,
+            resolve_surface=lambda *_args: surface)
+
+        live_image = viewport.render_snapshot(QSize(32, 32), None)
+        live_info = viewport.indexed_renderer_info
+        self.assertEqual(
+            live_info["effective_mode"], "retail_indexed_reconstructed")
+        self.assertEqual(
+            live_info["flat_tracy_destination_mode"], "live_framebuffer")
+        self.assertIsNone(
+            live_info["flat_tracy_forced_destination_index"])
+        self.assertTrue(live_info["canonical_retail_configuration"])
+        self.assertEqual(
+            live_info["last_render_stats"]["initial_framebuffer_index"], 0)
+
+        viewport.set_flat_tracy_forced_destination_index(13)
+        viewport.set_flat_tracy_destination_mode("forced_diagnostic")
+        self.assertEqual(viewport.indexed_renderer_info["last_render_stats"], {})
+        forced_image = viewport.render_snapshot(QSize(32, 32), None)
+        forced_info = viewport.indexed_renderer_info
+
+        self.assertEqual(
+            forced_info["effective_mode"],
+            "retail_indexed_forced_tracy_diagnostic")
+        self.assertEqual(
+            forced_info["flat_tracy_forced_destination_index"], 13)
+        self.assertEqual(
+            forced_info["flat_tracy_forced_destination_rgb"], [13, 13, 13])
+        self.assertFalse(forced_info["canonical_retail_configuration"])
+        self.assertEqual(
+            forced_info["last_render_stats"][
+                "flat_tracy_forced_destination_index"], 13)
+        self.assertNotEqual(
+            live_info["last_render_stats"]["index_buffer_sha256"],
+            forced_info["last_render_stats"]["index_buffer_sha256"])
+        self.assertNotEqual(
+            live_image.pixelColor(16, 16), forced_image.pixelColor(16, 16))
+
+    def test_destination_setters_validate_and_snapshot_restores_policy(self):
+        viewport = _viewport()
+        viewport.set_flat_tracy_forced_destination_index(31)
+        viewport.begin_snapshot_mode(None)
+        viewport.set_flat_tracy_destination_mode("forced_diagnostic")
+        viewport.set_flat_tracy_forced_destination_index(220)
+        viewport._last_indexed_stats = {"index_buffer_sha256": "diagnostic"}
+
+        restored = viewport.end_snapshot_mode()
+
+        self.assertEqual(restored, "textured_indexed")
+        self.assertEqual(
+            viewport.flat_tracy_destination_mode, "live_framebuffer")
+        self.assertEqual(viewport.flat_tracy_destination_index, 31)
+        self.assertEqual(viewport.indexed_renderer_info["last_render_stats"], {})
+        with self.assertRaises(ValueError):
+            viewport.set_flat_tracy_destination_mode("pretend_retail")
+        for value in (-1, 256):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                viewport.set_flat_tracy_forced_destination_index(value)
+        for value in (True, 1.5, "13"):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                viewport.set_flat_tracy_forced_destination_index(value)
 
     def test_runtime_material_failure_is_reported_as_effective_fallback(self):
         viewport = _viewport()
@@ -98,6 +185,101 @@ class IndexedViewerIntegrationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "mapping is incomplete"):
             viewport.render_snapshot(QSize(32, 32), None)
+
+    def test_exact_mode_culls_reverse_winding_pair_even_when_toggle_is_off(self):
+        viewport = _viewport()
+        viewport._faces.append(ViewFace(
+            vertices=[
+                (-1.0, -1.0, 0.0),
+                (1.0, -1.0, 0.0),
+                (0.0, 1.0, 0.0),
+            ],
+            uvs=[(0, 0), (255, 0), (128, 255)],
+            material=0,
+            poly_id=8,
+            mapped=True,
+            owner="root",
+            block_index=0,
+        ))
+        surface = IndexedSurface(
+            "solid", "solid", None, 0, 0, None, 23,
+            "none", 0, "none", "linear")
+        resolved = []
+
+        def resolve(face, *_args):
+            resolved.append(face.poly_id)
+            return surface
+
+        viewport._indexed_adapter = SimpleNamespace(
+            source_info={}, tables=_tables(), resolve_surface=resolve)
+        image = viewport.render_snapshot(QSize(32, 32), None)
+
+        self.assertFalse(image.isNull())
+        self.assertEqual(resolved, [7])
+        self.assertEqual(
+            viewport.indexed_renderer_info["last_render_stats"][
+                "ordered_piece_count"],
+            1,
+        )
+
+    def test_retail_cull_is_3d_preclip_not_near_plane_projection_clamp(self):
+        camera_vertices = [
+            (-0.16202796, -1.97493340, 3.61461335),
+            (-1.48634709, 1.25880337, 3.78281788),
+            (-0.81305745, 0.57071037, 3.98094668),
+        ]
+        self.assertTrue(
+            _retail_source_face_front_facing(camera_vertices))
+        self.assertFalse(
+            _retail_source_face_front_facing([
+                camera_vertices[0], camera_vertices[2], camera_vertices[1]
+            ]))
+
+    def test_cardinal_camera_trig_has_no_edge_on_residue(self):
+        self.assertEqual(_cardinal_sin_cos(0.0), (0.0, 1.0))
+        self.assertEqual(_cardinal_sin_cos(90.0), (1.0, 0.0))
+        self.assertEqual(_cardinal_sin_cos(-90.0), (-1.0, 0.0))
+        self.assertEqual(_cardinal_sin_cos(180.0), (0.0, -1.0))
+
+    def test_exact_mode_culls_whole_twisted_face_from_first_three_vertices(self):
+        viewport = _viewport()
+        viewport._faces = [ViewFace(
+            # Fan (0,2,1) is back-facing while fan (0,3,2) is front-facing.
+            # Retail rejects the whole source polygon from vertices 0/1/2
+            # before any fan triangle can resurrect it.
+            vertices=[
+                (0.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (1.0, 1.0, 0.0),
+            ],
+            uvs=[(0, 0), (255, 0), (0, 255), (255, 255)],
+            material=0,
+            poly_id=19,
+            mapped=True,
+            owner="root",
+            block_index=0,
+        )]
+        surface = IndexedSurface(
+            "solid", "solid", None, 0, 0, None, 23,
+            "none", 0, "none", "linear")
+        resolved = []
+
+        def resolve(face, *_args):
+            resolved.append(face.poly_id)
+            return surface
+
+        viewport._indexed_adapter = SimpleNamespace(
+            source_info={}, tables=_tables(), resolve_surface=resolve)
+        image = viewport.render_snapshot(QSize(32, 32), None)
+
+        self.assertFalse(image.isNull())
+        self.assertEqual(resolved, [])
+        self.assertEqual(
+            viewport.indexed_renderer_info["last_render_stats"][
+                "ordered_piece_count"],
+            0,
+        )
 
     def test_unmapped_polygon_cannot_be_silently_omitted_from_exact_export(self):
         viewport = _viewport(mapped=False)

@@ -24,13 +24,14 @@ def _palette():
 
 def _tables(*, shader_changes=None, tracy_changes=None):
     # Default SHADERMP rows preserve the source index.  Default TRACYRMP rows
-    # preserve the destination index.
+    # preserve the background index for every raw source texel.
     shader = bytearray(bytes(range(256)) * 256)
-    tracy = bytearray(bytes(range(256)) * 256)
+    tracy = bytearray(b"".join(
+        bytes((background,)) * 256 for background in range(256)))
     for (shade, source), output in (shader_changes or {}).items():
         shader[shade * 256 + source] = output
-    for (source, destination), output in (tracy_changes or {}).items():
-        tracy[source * 256 + destination] = output
+    for (background, source), output in (tracy_changes or {}).items():
+        tracy[background * 256 + source] = output
     return IndexedTables(_palette(), bytes(shader), bytes(tracy))
 
 
@@ -47,6 +48,10 @@ def _ua_profile_tracy():
         (159, 185): 106,
         (159, 156): 63,
         (156, 159): 140,
+        (0, 156): 223,
+        (223, 159): 207,
+        (0, 159): 255,
+        (255, 156): 191,
     }
     for (source, destination), output in changes.items():
         tracy[source * 256 + destination] = output
@@ -90,7 +95,7 @@ def _texture(
 def _triangle_piece(
         surface, *, face_id="face", polygon_id=1,
         screen=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
-        uvs=None, camera=None):
+        uvs=None, camera=None, source_order=0, sort_depth=0.0):
     if uvs is None:
         uvs = (
             ((0.0, 0.0),) * len(screen)
@@ -98,7 +103,8 @@ def _triangle_piece(
     if camera is None:
         camera = ((0.0, 0.0, 0.0),) * len(screen)
     return IndexedPiece(
-        face_id, polygon_id, screen, uvs, camera, surface)
+        face_id, polygon_id, screen, uvs, camera, surface,
+        source_order, sort_depth)
 
 
 def _quad_piece(surface, *, face_id="face", polygon_id=1, size=2):
@@ -209,9 +215,9 @@ class IndexedRendererTests(unittest.TestCase):
         tables = _tables(
             shader_changes={(3, 7): 88, (7, 3): 99},
             tracy_changes={
-                (31, 20): 44,
-                (20, 31): 55,
-                (31, 0): 33,
+                (20, 31): 44,
+                (31, 20): 55,
+                (0, 31): 33,
             },
         )
         shaded = _texture(
@@ -231,11 +237,11 @@ class IndexedRendererTests(unittest.TestCase):
         self.assertEqual(_at(reverse.indices), 20)
         self.assertEqual(
             forward.stats["tracy_lookup_axis_order"],
-            "TRACYRMP[source][destination]",
+            "TRACYRMP[background][raw_source]",
         )
 
     def test_flat_tracy_is_sensitive_to_destination_index_not_display_rgb(self):
-        tables = _tables(tracy_changes={(5, 10): 70, (5, 11): 71})
+        tables = _tables(tracy_changes={(10, 5): 70, (11, 5): 71})
         self.assertEqual(tables.palette[10], tables.palette[11])
         effect = _triangle_piece(
             _solid(5, tracy_mode="flat"),
@@ -250,10 +256,154 @@ class IndexedRendererTests(unittest.TestCase):
         self.assertEqual(_at(over_ten.indices), 70)
         self.assertEqual(_at(over_eleven.indices), 71)
 
-    def test_source_chroma_is_skipped_before_shade_and_tracy(self):
+    def test_forced_flat_destination_uses_one_diagnostic_row_per_layer(self):
+        tables = _tables(tracy_changes={
+            (10, 5): 20,
+            (20, 6): 30,
+            (13, 5): 70,
+            (13, 6): 80,
+        })
+        pieces = [
+            _triangle_piece(_solid(10), face_id="opaque"),
+            _triangle_piece(
+                _solid(5, tracy_mode="flat"), face_id="flat-five",
+                sort_depth=2.0),
+            _triangle_piece(
+                _solid(6, tracy_mode="flat"), face_id="flat-six",
+                sort_depth=1.0),
+        ]
+
+        live = IndexedRasterizer.render(1, 1, pieces, tables)
+        forced = IndexedRasterizer.render(
+            1, 1, pieces, tables,
+            flat_tracy_destination_override=13)
+
+        self.assertEqual(_at(live.indices), 30)
+        self.assertEqual(_at(forced.indices), 80)
+        self.assertTrue(live.stats["canonical_retail_destination_policy"])
+        self.assertFalse(
+            forced.stats["canonical_retail_destination_policy"])
+        self.assertFalse(
+            forced.stats["source_faithful_flat_destination_reads"])
+        self.assertEqual(
+            forced.stats["flat_tracy_destination_mode"],
+            "forced_diagnostic")
+        self.assertEqual(
+            forced.stats["flat_tracy_forced_destination_index"], 13)
+        self.assertEqual(forced.stats["initial_framebuffer_index"], 0)
+
+    def test_forced_flat_coverage_compares_with_actual_framebuffer(self):
+        tables = _tables(tracy_changes={(13, 5): 0})
+        effect = _triangle_piece(
+            _solid(5, tracy_mode="flat"), face_id="effect")
+
+        result = IndexedRasterizer.render(
+            1, 1, [effect], tables,
+            flat_tracy_destination_override=13)
+
+        self.assertEqual(_at(result.indices), 0)
+        self.assertFalse(bool(result.coverage[0][0]))
+        self.assertEqual(result.stats["flat_tracy_changed_samples"], 0)
+
+    def test_forced_flat_destination_does_not_change_clear_tracy(self):
+        tables = _tables(shader_changes={(2, 7): 99})
+        pieces = [
+            _triangle_piece(_solid(40), face_id="base"),
+            _triangle_piece(
+                _texture(
+                    (7,), 1, 1, shade_mode="gradient", shade_value=2,
+                    tracy_mode="clear"),
+                face_id="clear"),
+        ]
+
+        live = IndexedRasterizer.render(1, 1, pieces, tables)
+        forced = IndexedRasterizer.render(
+            1, 1, pieces, tables,
+            flat_tracy_destination_override=13)
+
+        self.assertEqual(_at(live.indices), 99)
+        self.assertEqual(_at(forced.indices), 99)
+        self.assertEqual(forced.stats["flat_tracy_samples"], 0)
+
+    def test_forced_flat_destination_validates_unsigned_palette_index(self):
+        tables = _tables()
+        for value in (-1, 256):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                IndexedRasterizer.render(
+                    1, 1, [], tables,
+                    flat_tracy_destination_override=value)
+        for value in (True, 1.5, "13"):
+            with self.subTest(value=value), self.assertRaises(TypeError):
+                IndexedRasterizer.render(
+                    1, 1, [], tables,
+                    flat_tracy_destination_override=value)
+
+    def test_forced_flat_numpy_and_python_backends_match(self):
+        tables = _tables(tracy_changes={
+            (13, 5): 70,
+            (13, 6): 80,
+        })
+        pieces = [
+            _triangle_piece(_solid(10), face_id="opaque"),
+            _triangle_piece(
+                _solid(5, tracy_mode="flat"), face_id="flat-five",
+                sort_depth=2.0),
+            _triangle_piece(
+                _solid(6, tracy_mode="flat"), face_id="flat-six",
+                sort_depth=1.0),
+        ]
+
+        accelerated = IndexedRasterizer.render(
+            1, 1, pieces, tables,
+            flat_tracy_destination_override=13)
+        with patch.object(indexed_renderer, "_np", None):
+            fallback = IndexedRasterizer.render(
+                1, 1, pieces, tables,
+                flat_tracy_destination_override=13)
+
+        self.assertEqual(_at(accelerated.indices), _at(fallback.indices))
+        self.assertEqual(
+            bool(accelerated.coverage[0][0]),
+            bool(fallback.coverage[0][0]))
+        for key in (
+                "flat_tracy_samples", "flat_tracy_changed_samples",
+                "flat_tracy_destination_mode",
+                "flat_tracy_forced_destination_index",
+                "index_buffer_sha256"):
+            self.assertEqual(accelerated.stats[key], fallback.stats[key])
+    def test_flat_tracy_uses_retail_background_source_axis_and_depth_order(self):
+        tables = _tables(tracy_changes={
+            (0, 156): 223,
+            (223, 159): 207,
+            (0, 159): 255,
+            (255, 156): 191,
+        })
+        source_156 = _triangle_piece(
+            _solid(156, tracy_mode="flat"), face_id="source-156",
+            sort_depth=2.0)
+        source_159 = _triangle_piece(
+            _solid(159, tracy_mode="flat"), face_id="source-159",
+            sort_depth=1.0)
+
+        forward = IndexedRasterizer.render(
+            1, 1, [source_156, source_159], tables)
+        reverse = IndexedRasterizer.render(
+            1, 1, [
+                _triangle_piece(
+                    _solid(156, tracy_mode="flat"), face_id="source-156",
+                    sort_depth=1.0),
+                _triangle_piece(
+                    _solid(159, tracy_mode="flat"), face_id="source-159",
+                    sort_depth=2.0),
+            ], tables)
+
+        self.assertEqual(_at(forward.indices), 207)
+        self.assertEqual(_at(reverse.indices), 191)
+
+    def test_flat_tracy_uses_raw_source_without_shade_or_chroma_rejection(self):
         tables = _tables(
             shader_changes={(2, 0): 22},
-            tracy_changes={(22, 7): 99},
+            tracy_changes={(7, 0): 99, (7, 22): 55},
         )
         base = _triangle_piece(_solid(7), face_id="base", polygon_id=7)
         chroma_effect = _texture(
@@ -266,26 +416,40 @@ class IndexedRendererTests(unittest.TestCase):
             tables,
         )
 
-        self.assertEqual(_at(result.indices), 7)
+        self.assertEqual(_at(result.indices), 99)
         self.assertTrue(bool(result.coverage[0][0]))
         self.assertEqual(_at(result.polygon_owner), 7)
-        self.assertEqual(result.stats["source_chroma_skipped"], 1)
-        self.assertEqual(result.stats["flat_tracy_samples"], 0)
+        self.assertEqual(result.stats["source_chroma_skipped"], 0)
+        self.assertEqual(result.stats["flat_tracy_samples"], 1)
+        self.assertEqual(result.stats["flat_tracy_source_zero_samples"], 1)
 
-    def test_tracy_row_13_noop_does_not_create_background_coverage(self):
+    def test_flat_tracy_table_noop_does_not_create_background_coverage(self):
         tables = _tables()
         noop = _triangle_piece(
-            _solid(13, tracy_mode="flat"), face_id="row13")
+            _solid(0, tracy_mode="flat"), face_id="source-zero")
         result = IndexedRasterizer.render(1, 1, [noop], tables)
 
         self.assertEqual(_at(result.indices), 0)
         self.assertFalse(bool(result.coverage[0][0]))
-        self.assertEqual(result.stats["flat_tracy_noop_row13_samples"], 1)
+        self.assertEqual(result.stats["flat_tracy_source_zero_samples"], 1)
         self.assertEqual(result.stats["flat_tracy_changed_samples"], 0)
 
+    def test_flat_source_zero_can_change_background_thirteen_without_erasing_coverage(self):
+        tables = _tables(tracy_changes={(13, 0): 0})
+        base = _triangle_piece(_solid(13), face_id="base", polygon_id=13)
+        effect = _triangle_piece(
+            _solid(0, tracy_mode="flat"), face_id="effect",
+            polygon_id=0, sort_depth=1.0)
+        result = IndexedRasterizer.render(1, 1, [base, effect], tables)
+
+        self.assertEqual(_at(result.indices), 0)
+        self.assertTrue(bool(result.coverage[0][0]))
+        self.assertEqual(_at(result.polygon_owner), 13)
+        self.assertEqual(result.stats["flat_tracy_changed_samples"], 1)
+
     def test_flat_tracy_deduplicates_bsp_fragments_per_source_face(self):
-        changes = {(5, destination): (destination + 1) % 256
-                   for destination in range(256)}
+        changes = {(background, 5): (background + 1) % 256
+                   for background in range(256)}
         tables = _tables(tracy_changes=changes)
         effect = _solid(5, tracy_mode="flat")
         first = _triangle_piece(effect, face_id="same", polygon_id=5)
@@ -303,6 +467,97 @@ class IndexedRendererTests(unittest.TestCase):
         self.assertEqual(deduplicated.stats["flat_tracy_samples"], 1)
         self.assertEqual(
             deduplicated.stats["flat_tracy_duplicate_samples_skipped"], 1)
+
+    def test_reversed_winding_distinct_flat_faces_both_layer(self):
+        changes = {(background, 5): (background + 1) % 256
+                   for background in range(256)}
+        tables = _tables(tracy_changes=changes)
+        effect = _solid(5, tracy_mode="flat")
+        forward = _triangle_piece(
+            effect, face_id="front", polygon_id=77, sort_depth=2.0)
+        reverse_winding = _triangle_piece(
+            effect, face_id="back", polygon_id=77,
+            screen=((0.0, 0.0), (0.0, 1.0), (1.0, 0.0)),
+            sort_depth=1.0)
+        duplicate_fragment = _triangle_piece(
+            effect, face_id="front", polygon_id=77,
+            screen=((0.0, 0.0), (0.0, 1.0), (1.0, 0.0)),
+            sort_depth=1.0)
+
+        distinct = IndexedRasterizer.render(
+            1, 1, [forward, reverse_winding], tables)
+        duplicate = IndexedRasterizer.render(
+            1, 1, [forward, duplicate_fragment], tables)
+        self.assertEqual(_at(distinct.indices), 2)
+        self.assertEqual(_at(duplicate.indices), 1)
+
+    def test_opaque_writes_zero_but_clear_skips_only_numeric_zero(self):
+        tables = _tables(shader_changes={(2, 0): 99, (2, 7): 88})
+        opaque_zero = _texture(
+            (0,), 1, 1, chroma=(0,), shade_mode="gradient",
+            shade_value=2, tracy_mode="none")
+        clear_zero = _texture(
+            (0,), 1, 1, chroma=(0,), shade_mode="gradient",
+            shade_value=2, tracy_mode="clear")
+        clear_palette_chroma = _texture(
+            (7,), 1, 1, chroma=(7,), shade_mode="gradient",
+            shade_value=2, tracy_mode="clear")
+
+        opaque = IndexedRasterizer.render(
+            1, 1, [_triangle_piece(opaque_zero)], tables)
+        skipped = IndexedRasterizer.render(
+            1, 1, [
+                _triangle_piece(_solid(40), face_id="base"),
+                _triangle_piece(clear_zero, face_id="clear-zero"),
+            ], tables)
+        nonzero = IndexedRasterizer.render(
+            1, 1, [
+                _triangle_piece(_solid(40), face_id="base"),
+                _triangle_piece(
+                    clear_palette_chroma, face_id="clear-seven"),
+            ], tables)
+
+        self.assertEqual(_at(opaque.indices), 99)
+        self.assertTrue(bool(opaque.coverage[0][0]))
+        self.assertEqual(_at(skipped.indices), 40)
+        self.assertEqual(skipped.stats["clear_source_zero_skipped"], 1)
+        self.assertEqual(_at(nonzero.indices), 88)
+
+    def test_numpy_and_python_match_for_deferred_transparency_and_occlusion(self):
+        tables = _tables(tracy_changes={(10, 6): 20})
+        pieces = [
+            _triangle_piece(
+                _solid(5, tracy_mode="flat"), face_id="behind-flat",
+                sort_depth=3.0),
+            _triangle_piece(_solid(10), face_id="front-opaque"),
+            _triangle_piece(
+                _solid(6, tracy_mode="flat"), face_id="front-flat",
+                sort_depth=2.0),
+            _triangle_piece(
+                _solid(7, tracy_mode="clear"), face_id="front-clear",
+                sort_depth=1.0),
+        ]
+
+        accelerated = IndexedRasterizer.render(1, 1, pieces, tables)
+        with patch.object(indexed_renderer, "_np", None):
+            fallback = IndexedRasterizer.render(1, 1, pieces, tables)
+
+        self.assertEqual(_at(accelerated.indices), _at(fallback.indices))
+        self.assertEqual(_at(accelerated.indices), 7)
+        self.assertEqual(_at(accelerated.polygon_owner), 1)
+        self.assertEqual(accelerated.stats["transparent_samples_occluded"], 1)
+        self.assertEqual(accelerated.stats["flat_tracy_samples"], 1)
+        self.assertEqual(
+            [entry["tracy_mode"] for entry in
+             accelerated.stats["transparent_replay_faces"]],
+            ["flat", "flat", "clear"],
+        )
+        self.assertEqual(
+            bool(accelerated.coverage[0][0]), bool(fallback.coverage[0][0]))
+        for key in (
+                "flat_tracy_samples", "flat_tracy_changed_samples",
+                "transparent_samples_occluded", "opaque_or_clear_samples"):
+            self.assertEqual(accelerated.stats[key], fallback.stats[key])
 
     def test_clear_tracy_shades_then_overwrites_destination(self):
         tables = _tables(shader_changes={(2, 7): 99})

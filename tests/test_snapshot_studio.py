@@ -93,6 +93,31 @@ class SnapshotStudioTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_flat_tracy_destination_selector_remains_in_focused_workspace(self):
+        window = SnapshotStudioWindow()
+        try:
+            policy = window.snapshot_tracy_destination_combo
+            index_spin = window.snapshot_tracy_destination_index_spin
+            self.assertTrue(window._snapshot_panel.isAncestorOf(policy))
+            self.assertEqual(policy.currentData(), "live_framebuffer")
+            self.assertEqual((index_spin.minimum(), index_spin.maximum()),
+                             (0, 255))
+
+            indexed = window.snapshot_renderer_combo.findData(
+                "textured_indexed")
+            window.snapshot_renderer_combo.setCurrentIndex(indexed)
+            forced = policy.findData("forced_diagnostic")
+            policy.setCurrentIndex(forced)
+            index_spin.setValue(31)
+            self.app.processEvents()
+
+            self.assertTrue(index_spin.isEnabled())
+            self.assertEqual(
+                window.viewport.flat_tracy_forced_destination_index, 31)
+            self.assertFalse(window._editing_allowed())
+        finally:
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()
