@@ -8,6 +8,12 @@ release line.
 
 ## [Unreleased]
 
+### Added
+
+- A public 4K comparison sheet for the Hauptstation, Zeppelin, and Mnosjetz,
+  showing the normal OpenUAStudio RGB preview beside the source-traced
+  retail-indexed reconstruction with matched cameras and animation states.
+
 ## [2.0.0] - 2026-08-15
 
 ### Added

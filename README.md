@@ -79,6 +79,21 @@ filtering and additive blending cannot represent, including Taerkasten
 Hauptstation lightning and the distinct clear-TRACY and flat-TRACY propeller
 systems.
 
+#### Release comparison
+
+The comparison below uses identical cameras and animation states for the
+Taerkasten Hauptstation (`VP_TAERO`), Zeppelin (`VP_ZEPPL`), and Mnosjetz
+(`VP_TFLUG`). The top row is OpenUAStudio's normal RGB preview; the bottom row
+is the source-traced retail-indexed reconstruction from the
+[v2.0.0 release](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v2.0.0).
+It is a viewer-renderer comparison, not an original retail gameplay capture.
+
+[![OpenUAStudio RGB preview compared with the v2.0.0 source-traced retail-indexed reconstruction](docs/images/openuastudio-retail-indexed-v2-comparison.png)](docs/images/openuastudio-retail-indexed-v2-comparison.png)
+
+The sheet was composed from six fresh native 4096 x 4096 captures and reduced
+with nearest-neighbor sampling only. It uses no generative AI, inpainting,
+smoothing, color grading, or upscaling.
+
 See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
 fail-closed export rules, current limits, and reproducible test commands.
 The Retail Indexed Viewer release line begins at **v2.0.0**. Ongoing
