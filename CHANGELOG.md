@@ -3,11 +3,12 @@
 All notable changes to the Retail Indexed Viewer fork are recorded here.
 
 This project follows the structure of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-The Retail Indexed Viewer work does not yet have a semantic version, so its
-completed changes remain under **Unreleased** until a release is intentionally
-cut. The repository's historical `Stable` tag predates this work.
+The repository's historical `Stable` tag predates the Retail Indexed Viewer
+release line.
 
 ## [Unreleased]
+
+## [2.0.0] - 2026-08-15
 
 ### Added
 
@@ -81,3 +82,6 @@ cut. The repository's historical `Stable` tag predates this work.
 - Diagnostic forced-row output receives an explicit filename suffix and
   renderer classification so it cannot be mistaken for canonical retail
   reconstruction output.
+
+[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/Stable...v2.0.0

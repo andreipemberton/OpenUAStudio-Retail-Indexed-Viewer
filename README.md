@@ -81,7 +81,8 @@ systems.
 
 See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
 fail-closed export rules, current limits, and reproducible test commands.
-Ongoing user-visible changes are maintained in [CHANGELOG.md](CHANGELOG.md).
+The Retail Indexed Viewer release line begins at **v2.0.0**. Ongoing
+user-visible changes are maintained in [CHANGELOG.md](CHANGELOG.md).
 
 The mode requires a lawfully obtained local game data set containing a
 256-entry palette plus matching `REMAP/SHADERMP.ILB` (or `.ILBM`) and
