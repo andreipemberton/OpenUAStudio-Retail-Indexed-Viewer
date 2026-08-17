@@ -526,6 +526,11 @@ class IndexedFamilyMaterialTests(unittest.TestCase):
                     self.assertEqual(surfaces[shade].shade_mode, "none")
                     self.assertEqual(surfaces[shade].shade_value, 0)
                     self.assertEqual(surfaces[shade].tracy_mode, "clear")
+                    self.assertEqual(
+                        surfaces[shade].authored_shade_value, shade)
+                    self.assertTrue(
+                        surfaces[shade].authored_depth_fade_flag)
+                    self.assertTrue(surfaces[shade].distance_fade_eligible)
             for shade, row in {
                 3: 4,
                 7: 8,
@@ -540,17 +545,73 @@ class IndexedFamilyMaterialTests(unittest.TestCase):
                     self.assertEqual(surfaces[shade].shade_mode, "gradient")
                     self.assertEqual(surfaces[shade].shade_value, row)
                     self.assertEqual(surfaces[shade].tracy_mode, "clear")
+                    self.assertEqual(
+                        surfaces[shade].authored_shade_value, shade)
+                    self.assertTrue(surfaces[shade].distance_fade_eligible)
             for shade in (254, 255):
                 with self.subTest(raw_shade=shade):
                     self.assertEqual(surfaces[shade].kind, "solid")
                     self.assertEqual(surfaces[shade].solid_index, 0)
                     self.assertEqual(surfaces[shade].shade_mode, "none")
                     self.assertEqual(surfaces[shade].tracy_mode, "none")
+                    self.assertEqual(
+                        surfaces[shade].authored_shade_value, shade)
+                    self.assertTrue(
+                        surfaces[shade].authored_depth_fade_flag)
+                    self.assertFalse(surfaces[shade].distance_fade_eligible)
 
             shade_info = adapter.source_info["shade_model"]
-            self.assertFalse(shade_info["depth_fade_emulated"])
+            self.assertTrue(shade_info["depth_fade_emulated"])
+            self.assertFalse(shade_info["depth_fade_default_enabled"])
             self.assertEqual(shade_info["depth_fade_blocks"], ["root block 0"])
-            self.assertIn("outside dfade_start", shade_info["depth_fade_limitation"])
+            self.assertEqual(
+                shade_info["depth_fade_eligible_blocks"], ["root block 0"])
+            self.assertEqual(
+                shade_info["depth_fade_profile"]["fade_start"], 800.0)
+            self.assertTrue(shade_info["asset_stores_depth_fade_flag"])
+            self.assertFalse(shade_info["asset_stores_distance_profile"])
+            self.assertEqual(
+                shade_info["available_viewer_profile"]["profile_origin"],
+                "original_normal_gameplay_near_runtime")
+            self.assertIn(
+                "not a recovered mission/world placement",
+                shade_info["available_viewer_profile"]["camera_context"])
+            self.assertIn("rint(b*64768)", shade_info["depth_fade_formula"])
+
+    def test_depth_fade_flag_on_flat_lnf_is_reported_but_never_eligible(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            palette_path, _shader, _tracy, palette = _make_set_sources(
+                Path(temporary) / "Set1"
+            )
+            block = AmeshBlock(
+                area_flags=0x1,
+                polflags=0x8A,
+                texture=TextureRef(kind="ilbm", name="FX.ILBM"),
+                atts=[AttsEntry(0, 0, 31, 0, 0)],
+            )
+            family = _make_family(
+                palette_path,
+                palette,
+                [block],
+                {"FX.ILBM": IlbmImage(
+                    source_name="FX.ILBM", width=1, height=1,
+                    pixels=b"\x07")},
+            )
+            adapter, reason = IndexedFamilyAdapter.try_create(family)
+            self.assertEqual(reason, "")
+            assert adapter is not None
+
+            surface = adapter.resolve_surface(
+                _face(0, 0, shade=None), _material("FX.ILBM"), 0)
+
+            self.assertTrue(surface.authored_depth_fade_flag)
+            self.assertEqual(surface.authored_shade_value, 31)
+            self.assertFalse(surface.distance_fade_eligible)
+            self.assertEqual(surface.tracy_mode, "flat")
+            shade_info = adapter.source_info["shade_model"]
+            self.assertEqual(shade_info["depth_fade_blocks"], ["root block 0"])
+            self.assertEqual(shade_info["depth_fade_eligible_blocks"], [])
+            self.assertIn("flat LNF", shade_info["depth_fade_scope"])
 
     def test_embedded_palette_wins_for_chroma_and_raw_bytes_are_cached(self):
         with tempfile.TemporaryDirectory() as temporary:

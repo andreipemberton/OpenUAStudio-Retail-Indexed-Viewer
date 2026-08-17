@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import math
 import operator
 import os
 import re
@@ -39,6 +40,12 @@ from PySide6.QtWidgets import (
 from assembly_viewer import (
     AssetViewport,
     INDEXED_EFFECTIVE_RENDERERS,
+    RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE,
+    RETAIL_AREA_DISTANCE_FADE_FORMULA,
+    RETAIL_AREA_DISTANCE_FADE_LENGTH,
+    RETAIL_AREA_DISTANCE_FADE_PROFILE_ID,
+    RETAIL_AREA_DISTANCE_FADE_START,
+    RETAIL_AREA_DISTANCE_FADE_VISIBILITY_LIMIT,
     TEXTURED_VIEW_MODES,
     VIEW_PRESET_ANGLES,
 )
@@ -115,6 +122,14 @@ class BatchManifestRow:
     effective_initial_framebuffer_index: int | None
     effective_initial_framebuffer_rgb: str
     effective_flat_tracy_forced_destination_rgb: str
+    requested_distance_fade_enabled: bool | None
+    effective_distance_fade_enabled: bool | None
+    distance_fade_profile_id: str
+    distance_fade_visibility_limit: float | None
+    distance_fade_start: float | None
+    distance_fade_length: float | None
+    distance_fade_distance_space: str
+    distance_fade_formula: str
 
 
 def safe_component(value: str, fallback: str = "unnamed",
@@ -177,10 +192,28 @@ def _manifest_rgb_hex(value) -> str:
     return f"#{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}"
 
 
+def _manifest_bool(value) -> bool | None:
+    """Return a real JSON-style boolean without accepting truthy values."""
+
+    return value if isinstance(value, bool) else None
+
+
+def _manifest_finite_float(value) -> float | None:
+    """Normalize one finite numeric renderer parameter for provenance."""
+
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _requested_destination_profile(
         renderer_mode: str, destination_mode: str,
-        forced_index) -> dict[str, object]:
-    """Return the normalized renderer/destination profile for a batch."""
+        forced_index, distance_fade_enabled=False) -> dict[str, object]:
+    """Return the normalized output-affecting renderer profile for a batch."""
 
     renderer_mode = str(renderer_mode)
     if renderer_mode != "textured_indexed":
@@ -188,6 +221,13 @@ def _requested_destination_profile(
             "renderer_mode": renderer_mode,
             "flat_tracy_destination_mode": None,
             "flat_tracy_forced_destination_index": None,
+            "distance_fade_enabled": None,
+            "distance_fade_profile_id": None,
+            "distance_fade_visibility_limit": None,
+            "distance_fade_start": None,
+            "distance_fade_length": None,
+            "distance_fade_distance_space": None,
+            "distance_fade_formula": None,
         }
     destination_mode = str(destination_mode)
     if destination_mode not in _FLAT_TRACY_DESTINATION_MODES:
@@ -197,10 +237,78 @@ def _requested_destination_profile(
         normalized_index = _manifest_palette_index(forced_index)
         if normalized_index is None:
             normalized_index = 0
+    fade_enabled = bool(_manifest_bool(distance_fade_enabled) or False)
     return {
         "renderer_mode": renderer_mode,
         "flat_tracy_destination_mode": destination_mode,
         "flat_tracy_forced_destination_index": normalized_index,
+        "distance_fade_enabled": fade_enabled,
+        "distance_fade_profile_id": (
+            RETAIL_AREA_DISTANCE_FADE_PROFILE_ID if fade_enabled else None),
+        "distance_fade_visibility_limit": (
+            RETAIL_AREA_DISTANCE_FADE_VISIBILITY_LIMIT
+            if fade_enabled else None),
+        "distance_fade_start": (
+            RETAIL_AREA_DISTANCE_FADE_START if fade_enabled else None),
+        "distance_fade_length": (
+            RETAIL_AREA_DISTANCE_FADE_LENGTH if fade_enabled else None),
+        "distance_fade_distance_space": (
+            RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE
+            if fade_enabled else None),
+        "distance_fade_formula": (
+            RETAIL_AREA_DISTANCE_FADE_FORMULA if fade_enabled else None),
+    }
+
+
+def _normalize_recorded_distance_fade_profile(value) -> dict[str, object] | None:
+    """Validate a recorded enabled profile without accepting coercions."""
+
+    if not isinstance(value, dict):
+        return None
+    profile_id = value.get("profile_id")
+    distance_space = value.get("distance_space")
+    formula = value.get("formula")
+    if not all(isinstance(item, str) and item
+               for item in (profile_id, distance_space, formula)):
+        return None
+    raw_numbers = (
+        value.get("visibility_limit"),
+        value.get("fade_start"),
+        value.get("fade_length"),
+    )
+    if any(isinstance(item, bool) or not isinstance(item, (int, float))
+           for item in raw_numbers):
+        return None
+    visibility_limit = _manifest_finite_float(raw_numbers[0])
+    fade_start = _manifest_finite_float(raw_numbers[1])
+    fade_length = _manifest_finite_float(raw_numbers[2])
+    if None in (visibility_limit, fade_start, fade_length):
+        return None
+    return {
+        "distance_fade_profile_id": profile_id,
+        "distance_fade_visibility_limit": visibility_limit,
+        "distance_fade_start": fade_start,
+        "distance_fade_length": fade_length,
+        "distance_fade_distance_space": distance_space,
+        "distance_fade_formula": formula,
+    }
+
+
+def _recorded_distance_fade_profile(
+        requested_profile: dict[str, object]) -> dict[str, object] | None:
+    """Serialize the active requested profile in stable public field names."""
+
+    if requested_profile.get("distance_fade_enabled") is not True:
+        return None
+    return {
+        "profile_id": requested_profile["distance_fade_profile_id"],
+        "visibility_limit": requested_profile[
+            "distance_fade_visibility_limit"],
+        "fade_start": requested_profile["distance_fade_start"],
+        "fade_length": requested_profile["distance_fade_length"],
+        "distance_space": requested_profile[
+            "distance_fade_distance_space"],
+        "formula": requested_profile["distance_fade_formula"],
     }
 
 
@@ -213,8 +321,12 @@ def _destination_profile_label(profile: dict[str, object]) -> str:
     mode = profile.get("flat_tracy_destination_mode")
     if mode == "forced_diagnostic":
         index = profile.get("flat_tracy_forced_destination_index")
-        return f"Retail Indexed / forced diagnostic row {index}"
-    return "Retail Indexed / live framebuffer (canonical)"
+        label = f"Retail Indexed / forced diagnostic row {index}"
+    else:
+        label = "Retail Indexed / live framebuffer (canonical)"
+    fade = "distance fade on" if profile.get(
+        "distance_fade_enabled") else "distance fade off"
+    return f"{label} / {fade}"
 
 
 class VPSnapshotBatchPanel(QGroupBox):
@@ -246,6 +358,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._renderer_mode = "textured"
         self._flat_tracy_destination_mode = "live_framebuffer"
         self._flat_tracy_forced_destination_index = 0
+        self._distance_fade_enabled = False
         self._batch_viewport: AssetViewport | None = None
         self._active_source_key: tuple[str, int] | None = None
 
@@ -450,6 +563,7 @@ class VPSnapshotBatchPanel(QGroupBox):
         if self._renderer_mode not in TEXTURED_VIEW_MODES:
             self._renderer_mode = "textured"
         self._capture_flat_tracy_destination_settings()
+        self._capture_distance_fade_setting()
         collision_reason = self._skip_existing_profile_collision_reason()
         if collision_reason:
             QMessageBox.warning(
@@ -559,6 +673,14 @@ class VPSnapshotBatchPanel(QGroupBox):
         self._flat_tracy_forced_destination_index = (
             _manifest_palette_index(requested_index) or 0)
 
+    def _capture_distance_fade_setting(self) -> None:
+        """Freeze the visible indexed distance-fade toggle for this batch."""
+
+        source_viewport = getattr(self.window, "viewport", None)
+        requested = _manifest_bool(getattr(
+            source_viewport, "distance_fade_enabled", False))
+        self._distance_fade_enabled = bool(requested or False)
+
     def _create_batch_viewport(self) -> AssetViewport:
         """Create a hidden renderer with the batch-start settings frozen."""
 
@@ -568,6 +690,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             self._flat_tracy_forced_destination_index)
         viewport.set_flat_tracy_destination_mode(
             self._flat_tracy_destination_mode)
+        viewport.set_distance_fade_enabled(self._distance_fade_enabled)
         viewport.begin_snapshot_mode(None)
         viewport.play_animation(False)
         viewport.set_snapshot_guides_visible(False)
@@ -617,6 +740,11 @@ class VPSnapshotBatchPanel(QGroupBox):
             "indexed_flat_tracy_destination_mode_requested")
         forced_index = existing_info.get(
             "indexed_flat_tracy_forced_destination_index_requested")
+        missing = object()
+        distance_fade_enabled = existing_info.get(
+            "indexed_distance_fade_enabled_requested", missing)
+        recorded_fade_profile = existing_info.get(
+            "indexed_distance_fade_profile_requested", missing)
         if renderer_mode == "textured_indexed":
             summary = existing_info.get("renderer_summary")
             if not isinstance(summary, dict):
@@ -627,6 +755,12 @@ class VPSnapshotBatchPanel(QGroupBox):
             if forced_index is None:
                 forced_index = summary.get(
                     "requested_flat_tracy_forced_destination_index")
+            if distance_fade_enabled is missing:
+                distance_fade_enabled = summary.get(
+                    "requested_distance_fade_enabled", missing)
+            if recorded_fade_profile is missing:
+                recorded_fade_profile = summary.get(
+                    "requested_distance_fade_profile", missing)
             if destination_mode not in _FLAT_TRACY_DESTINATION_MODES:
                 return (
                     "The selected folder contains indexed PNG files, but "
@@ -640,14 +774,58 @@ class VPSnapshotBatchPanel(QGroupBox):
                     "files, but run_info.json has no valid forced palette "
                     "destination index."
                 )
+            if distance_fade_enabled is missing:
+                # Indexed batches written before this toggle existed can only
+                # contain the historical fade-disabled output.
+                distance_fade_enabled = False
+            elif _manifest_bool(distance_fade_enabled) is None:
+                return (
+                    "The selected folder contains indexed PNG files, but "
+                    "run_info.json does not prove whether reconstructed "
+                    "distance fade was enabled."
+                )
+            if distance_fade_enabled is True:
+                normalized_record = (
+                    _normalize_recorded_distance_fade_profile(
+                        recorded_fade_profile))
+                if normalized_record is None:
+                    return (
+                        "The selected folder contains distance-faded indexed "
+                        "PNGs, but run_info.json does not prove the complete "
+                        "distance-fade profile and formula."
+                    )
 
         existing_profile = _requested_destination_profile(
-            renderer_mode, destination_mode, forced_index)
+            renderer_mode, destination_mode, forced_index,
+            distance_fade_enabled)
         requested_profile = _requested_destination_profile(
             self._renderer_mode,
             self._flat_tracy_destination_mode,
             self._flat_tracy_forced_destination_index,
+            getattr(self, "_distance_fade_enabled", False),
         )
+        if renderer_mode == "textured_indexed" \
+                and distance_fade_enabled is True:
+            supported_enabled_profile = _requested_destination_profile(
+                "textured_indexed", destination_mode, forced_index, True)
+            expected_fade_profile = {
+                key: supported_enabled_profile[key]
+                for key in (
+                    "distance_fade_profile_id",
+                    "distance_fade_visibility_limit",
+                    "distance_fade_start",
+                    "distance_fade_length",
+                    "distance_fade_distance_space",
+                    "distance_fade_formula",
+                )
+            }
+            if normalized_record != expected_fade_profile:
+                return (
+                    "The selected folder contains snapshots made with a "
+                    "different distance-fade profile or formula. Use a "
+                    "separate output folder or disable Skip existing to "
+                    "overwrite intentionally."
+                )
         if existing_profile != requested_profile:
             return (
                 "The selected folder contains snapshots from "
@@ -933,6 +1111,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             return
 
         had_existing_final = output_path.is_file()
+        renderer_info = None
         try:
             self._batch_viewport.apply_snapshot_preset(
                 view, self._target_size, self._zoom)
@@ -944,6 +1123,12 @@ class VPSnapshotBatchPanel(QGroupBox):
             if image.isNull():
                 raise RuntimeError(
                     "Snapshot renderer returned a null image")
+            renderer_info = self._batch_viewport.indexed_renderer_info
+            # Prove exact renderer/profile provenance before committing the
+            # PNG. Missing indexed fade statistics must fail closed rather
+            # than being reconstructed from static viewer descriptors later.
+            self._renderer_manifest_fields(
+                renderer_info, status="WRITTEN")
             self._write_png_atomic(image, output_path)
         except Exception as exc:
             message = str(exc)
@@ -955,8 +1140,10 @@ class VPSnapshotBatchPanel(QGroupBox):
             self._record(
                 source, view, relative if retained else "", status, message,
                 renderer_info=(
-                    self._batch_viewport.indexed_renderer_info
-                    if self._batch_viewport is not None else None
+                    renderer_info
+                    if renderer_info is not None else (
+                        self._batch_viewport.indexed_renderer_info
+                        if self._batch_viewport is not None else None)
                 ),
                 renderer_reason=message,
             )
@@ -971,8 +1158,10 @@ class VPSnapshotBatchPanel(QGroupBox):
                 source, view, relative, "WRITTEN",
                 f"{image.width()}x{image.height()} transparent PNG ({mode})",
                 renderer_info=(
-                    self._batch_viewport.indexed_renderer_info
-                    if self._batch_viewport is not None else None
+                    renderer_info
+                    if renderer_info is not None else (
+                        self._batch_viewport.indexed_renderer_info
+                        if self._batch_viewport is not None else None)
                 ),
             )
             self._written += 1
@@ -1048,6 +1237,14 @@ class VPSnapshotBatchPanel(QGroupBox):
             renderer["effective_initial_framebuffer_index"],
             renderer["effective_initial_framebuffer_rgb"],
             renderer["effective_flat_tracy_forced_destination_rgb"],
+            renderer["requested_distance_fade_enabled"],
+            renderer["effective_distance_fade_enabled"],
+            renderer["distance_fade_profile_id"],
+            renderer["distance_fade_visibility_limit"],
+            renderer["distance_fade_start"],
+            renderer["distance_fade_length"],
+            renderer["distance_fade_distance_space"],
+            renderer["distance_fade_formula"],
         ))
 
     def _renderer_manifest_fields(
@@ -1122,6 +1319,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             getattr(
                 self, "_flat_tracy_destination_mode", "live_framebuffer"),
             getattr(self, "_flat_tracy_forced_destination_index", 0),
+            getattr(self, "_distance_fade_enabled", False),
         )
         requested_destination_mode = (
             str(requested_profile["flat_tracy_destination_mode"])
@@ -1131,13 +1329,57 @@ class VPSnapshotBatchPanel(QGroupBox):
             requested_profile["flat_tracy_forced_destination_index"]
             if requested == "retail_indexed_reconstructed" else None
         )
+        requested_distance_fade_enabled = (
+            bool(requested_profile["distance_fade_enabled"])
+            if requested == "retail_indexed_reconstructed" else None
+        )
         effective_destination_mode = ""
         effective_destination_class = ""
         effective_forced_index = None
         effective_initial_index = None
         effective_initial_rgb = ""
         effective_forced_rgb = ""
+        effective_distance_fade_enabled = None
+        distance_fade_profile_id = ""
+        distance_fade_visibility_limit = None
+        distance_fade_start = None
+        distance_fade_length = None
+        distance_fade_distance_space = ""
+        distance_fade_formula = ""
         if exact_indexed_output:
+            stats_fade_profile = stats.get("distance_fade_profile", {})
+            if not isinstance(stats_fade_profile, dict):
+                stats_fade_profile = {}
+            stats_profile_id = str(
+                stats_fade_profile.get("name", "") or "")
+            stats_visibility_limit = _manifest_finite_float(
+                stats_fade_profile.get("visibility_limit"))
+            stats_fade_start = _manifest_finite_float(
+                stats_fade_profile.get("fade_start"))
+            stats_fade_length = _manifest_finite_float(
+                stats_fade_profile.get("fade_length"))
+            stats_formula = str(
+                stats.get("distance_fade_formula", "") or "")
+            renderer_distance_space = str(
+                renderer_info.get("distance_fade_distance_space", "") or "")
+            if requested_distance_fade_enabled:
+                proven_profile = {
+                    "distance_fade_profile_id": stats_profile_id,
+                    "distance_fade_visibility_limit": stats_visibility_limit,
+                    "distance_fade_start": stats_fade_start,
+                    "distance_fade_length": stats_fade_length,
+                    "distance_fade_distance_space": renderer_distance_space,
+                    "distance_fade_formula": stats_formula,
+                }
+                expected_profile = {
+                    key: requested_profile[key]
+                    for key in proven_profile
+                }
+                if proven_profile != expected_profile:
+                    raise RuntimeError(
+                        "exact indexed distance-fade output lacks complete "
+                        "raster-stat proof for the requested runtime profile"
+                    )
             candidate_mode = str(
                 renderer_info.get("flat_tracy_destination_mode", ""))
             if candidate_mode in _FLAT_TRACY_DESTINATION_MODES:
@@ -1155,6 +1397,35 @@ class VPSnapshotBatchPanel(QGroupBox):
                     effective_forced_rgb = _manifest_rgb_hex(
                         renderer_info.get(
                             "flat_tracy_forced_destination_rgb"))
+            effective_distance_fade_enabled = _manifest_bool(
+                renderer_info.get("effective_distance_fade_enabled"))
+            if effective_distance_fade_enabled is None:
+                # Pre-toggle renderer metadata can only describe the existing
+                # fade-disabled path.
+                effective_distance_fade_enabled = False
+            distance_fade_profile_id = (
+                stats_profile_id
+                if requested_distance_fade_enabled
+                else "disabled_closeup_compatibility"
+            )
+            distance_fade_visibility_limit = _manifest_finite_float(
+                stats_visibility_limit
+                if requested_distance_fade_enabled
+                else renderer_info.get("distance_fade_visibility_limit"))
+            distance_fade_start = _manifest_finite_float(
+                stats_fade_start
+                if requested_distance_fade_enabled
+                else renderer_info.get("distance_fade_start"))
+            distance_fade_length = _manifest_finite_float(
+                stats_fade_length
+                if requested_distance_fade_enabled
+                else renderer_info.get("distance_fade_length"))
+            distance_fade_distance_space = renderer_distance_space
+            distance_fade_formula = (
+                stats_formula
+                if requested_distance_fade_enabled
+                else str(renderer_info.get("distance_fade_formula", "") or "")
+            )
         return {
             "requested_renderer": requested,
             "effective_renderer": effective,
@@ -1182,6 +1453,17 @@ class VPSnapshotBatchPanel(QGroupBox):
             "effective_initial_framebuffer_rgb": effective_initial_rgb,
             "effective_flat_tracy_forced_destination_rgb": (
                 effective_forced_rgb),
+            "requested_distance_fade_enabled": (
+                requested_distance_fade_enabled),
+            "effective_distance_fade_enabled": (
+                effective_distance_fade_enabled),
+            "distance_fade_profile_id": distance_fade_profile_id,
+            "distance_fade_visibility_limit": (
+                distance_fade_visibility_limit),
+            "distance_fade_start": distance_fade_start,
+            "distance_fade_length": distance_fade_length,
+            "distance_fade_distance_space": distance_fade_distance_space,
+            "distance_fade_formula": distance_fade_formula,
         }
 
     def _write_manifests(self, cancelled: bool) -> None:
@@ -1252,11 +1534,16 @@ class VPSnapshotBatchPanel(QGroupBox):
             self._renderer_mode,
             self._flat_tracy_destination_mode,
             self._flat_tracy_forced_destination_index,
+            getattr(self, "_distance_fade_enabled", False),
         )
         requested_destination_mode = requested_profile[
             "flat_tracy_destination_mode"]
         requested_forced_index = requested_profile[
             "flat_tracy_forced_destination_index"]
+        requested_distance_fade_enabled = requested_profile[
+            "distance_fade_enabled"]
+        requested_distance_fade_profile = (
+            _recorded_distance_fade_profile(requested_profile))
         renderer_summary = {
             "requested_renderer": (
                 "retail_indexed_reconstructed"
@@ -1279,6 +1566,14 @@ class VPSnapshotBatchPanel(QGroupBox):
             ),
             "requested_flat_tracy_forced_destination_index": (
                 requested_forced_index
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "requested_distance_fade_enabled": (
+                requested_distance_fade_enabled
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "requested_distance_fade_profile": (
+                requested_distance_fade_profile
                 if self._renderer_mode == "textured_indexed" else None
             ),
             "verified_written_flat_tracy_destination_profiles": [
@@ -1307,15 +1602,51 @@ class VPSnapshotBatchPanel(QGroupBox):
                     "" if value is None else str(value)
                     for value in profile))
             ],
+            "verified_written_distance_fade_profiles": [
+                {
+                    "enabled": enabled,
+                    "profile_id": profile_id,
+                    "visibility_limit": visibility_limit,
+                    "start": start,
+                    "length": length,
+                    "distance_space": distance_space,
+                    "formula": formula,
+                }
+                for (
+                    enabled,
+                    profile_id,
+                    visibility_limit,
+                    start,
+                    length,
+                    distance_space,
+                    formula,
+                ) in sorted({
+                    (
+                        row.effective_distance_fade_enabled,
+                        row.distance_fade_profile_id,
+                        row.distance_fade_visibility_limit,
+                        row.distance_fade_start,
+                        row.distance_fade_length,
+                        row.distance_fade_distance_space,
+                        row.distance_fade_formula,
+                    )
+                    for row in self._rows
+                    if row.status == "WRITTEN"
+                    and row.effective_distance_fade_enabled is not None
+                }, key=lambda profile: tuple(
+                    "" if value is None else str(value)
+                    for value in profile))
+            ],
             "destination_profile_output_collision_warning": (
                 "Destination mode/index changes do not alter image filenames. "
-                "Skip-existing resume is permitted only when run_info.json "
-                "proves the same renderer/destination profile; otherwise use "
-                "a separate output folder or overwrite intentionally."
+                "Distance-fade changes do not alter them either. Skip-existing "
+                "resume is permitted only when run_info.json proves the same "
+                "renderer/destination/fade profile; otherwise use a separate "
+                "output folder or overwrite intentionally."
             ),
             "skip_existing_collision_policy": (
                 "populated_output_requires_matching_run_info_renderer_and_"
-                "destination_profile"
+                "destination_and_distance_fade_profile"
             ),
             "source_profiles": [
                 {
@@ -1330,9 +1661,9 @@ class VPSnapshotBatchPanel(QGroupBox):
                 "source profiles. EXISTS and ERROR_EXISTING_RETAINED files "
                 "are retained but not renderer-verified; per-image provenance "
                 "is authoritative in manifest.json. Destination mode/index "
-                "changes do not alter filenames; Skip existing refuses a "
-                "populated folder unless its prior run_info proves the same "
-                "renderer/destination profile"
+                "and distance-fade changes do not alter filenames; Skip "
+                "existing refuses a populated folder unless its prior "
+                "run_info proves the same renderer/destination/fade profile"
             ),
         }
         if attempted_source_profiles:
@@ -1374,6 +1705,14 @@ class VPSnapshotBatchPanel(QGroupBox):
             ),
             "indexed_flat_tracy_forced_destination_index_requested": (
                 requested_forced_index
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "indexed_distance_fade_enabled_requested": (
+                requested_distance_fade_enabled
+                if self._renderer_mode == "textured_indexed" else None
+            ),
+            "indexed_distance_fade_profile_requested": (
+                requested_distance_fade_profile
                 if self._renderer_mode == "textured_indexed" else None
             ),
             "renderer_summary": renderer_summary,

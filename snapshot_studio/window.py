@@ -6,6 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFrame,
     QGroupBox,
@@ -175,9 +176,13 @@ class SnapshotStudioWindow(AssemblyWindow):
         self._toolbar_step_button = self.step_button
         self._toolbar_speed_spin = self.speed_spin
 
-        self.play_button = QPushButton("Play")
-        self.play_button.setCheckable(True)
+        self.play_button = QCheckBox("Enable animations")
         self.play_button.setEnabled(False)
+        self.play_button.setToolTip(
+            "Continuously play resolved VANM texture and effect frames. "
+            "Uncheck to freeze the current frame; Reset Frame returns to "
+            "frame 1. Applies to both renderers. Complete-model batch "
+            "exports remain deterministic at the reset frame.")
         self.play_button.toggled.connect(self._toggle_play)
 
         self.step_button = QPushButton(">>")
@@ -196,7 +201,6 @@ class SnapshotStudioWindow(AssemblyWindow):
         if animation_box is not None:
             vanm_row = QHBoxLayout()
             vanm_row.setSpacing(4)
-            vanm_row.addWidget(QLabel("VANM preview:"))
             vanm_row.addWidget(self.play_button)
             vanm_row.addWidget(self.step_button)
             vanm_row.addWidget(QLabel("Speed:"))

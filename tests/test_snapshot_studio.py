@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QTabWidget
+from PySide6.QtWidgets import QApplication, QCheckBox, QTabWidget
 
 from snapshot_studio import SnapshotStudioWindow
 
@@ -115,6 +115,27 @@ class SnapshotStudioTests(unittest.TestCase):
             self.assertEqual(
                 window.viewport.flat_tracy_forced_destination_index, 31)
             self.assertFalse(window._editing_allowed())
+        finally:
+            window.close()
+
+    def test_animation_and_distance_fade_checkboxes_are_focused_controls(self):
+        window = SnapshotStudioWindow()
+        try:
+            self.assertIsInstance(window.play_button, QCheckBox)
+            self.assertEqual(window.play_button.text(), "Enable animations")
+            self.assertFalse(window.play_button.isChecked())
+            self.assertTrue(
+                window._snapshot_panel.isAncestorOf(window.play_button))
+
+            fade = window.snapshot_distance_fade_check
+            self.assertTrue(window._snapshot_panel.isAncestorOf(fade))
+            self.assertFalse(fade.isChecked())
+            self.assertFalse(fade.isEnabled())
+            indexed = window.snapshot_renderer_combo.findData(
+                "textured_indexed")
+            window.snapshot_renderer_combo.setCurrentIndex(indexed)
+            self.app.processEvents()
+            self.assertTrue(fade.isEnabled())
         finally:
             window.close()
 

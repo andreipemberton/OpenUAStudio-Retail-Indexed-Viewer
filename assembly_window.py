@@ -1266,9 +1266,13 @@ class AssemblyWindow(QMainWindow):
         self.animation_toolbar = anim_bar
 
         anim_bar.addWidget(QLabel(" VANM preview: "))
-        self.play_button = QPushButton("Play")
-        self.play_button.setCheckable(True)
+        self.play_button = QCheckBox("Enable animations")
         self.play_button.setEnabled(False)
+        self.play_button.setToolTip(
+            "Continuously play resolved VANM texture and effect frames. "
+            "Uncheck to freeze the current frame; Reset Frame returns to "
+            "frame 1. Applies to both renderers. Complete-model batch "
+            "exports remain deterministic at the reset frame.")
         self.play_button.toggled.connect(self._toggle_play)
         anim_bar.addWidget(self.play_button)
 
@@ -1750,14 +1754,28 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_renderer_combo.currentIndexChanged.connect(
             self._on_snapshot_renderer_changed)
         view_layout.addWidget(self.snapshot_renderer_combo, 1, 1)
-        view_layout.addWidget(QLabel("Zoom:"), 2, 0)
+        self.snapshot_distance_fade_check = QCheckBox(
+            "AREA distance fade (1400/600)")
+        self.snapshot_distance_fade_check.setChecked(False)
+        self.snapshot_distance_fade_check.setToolTip(
+            "Original per-vertex radial AREA fade. Starts at 800 UA units "
+            "and reaches palette index 0 at 1400. Applies only to "
+            "AREA_FLAG_DPTHFADE gradient-shaded faces; pan and lens zoom do "
+            "not change distance. Uses the current auto-fit viewer-camera "
+            "distance, not a recovered mission/world placement. Off "
+            "preserves v2.0 close-up output.")
+        self.snapshot_distance_fade_check.toggled.connect(
+            self._on_retail_area_distance_fade_toggled)
+        view_layout.addWidget(
+            self.snapshot_distance_fade_check, 2, 0, 1, 2)
+        view_layout.addWidget(QLabel("Zoom:"), 3, 0)
         self.snapshot_zoom_spin = QSpinBox()
         self.snapshot_zoom_spin.setRange(25, 300)
         self.snapshot_zoom_spin.setSuffix("%")
         self.snapshot_zoom_spin.setValue(100)
         self.snapshot_zoom_spin.valueChanged.connect(
             self._on_snapshot_zoom_changed)
-        view_layout.addWidget(self.snapshot_zoom_spin, 2, 1)
+        view_layout.addWidget(self.snapshot_zoom_spin, 3, 1)
         self.snapshot_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.snapshot_zoom_slider.setRange(25, 300)
         self.snapshot_zoom_slider.setValue(100)
@@ -1765,13 +1783,13 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_zoom_slider.setPageStep(10)
         self.snapshot_zoom_slider.valueChanged.connect(
             self._on_snapshot_zoom_changed)
-        view_layout.addWidget(self.snapshot_zoom_slider, 3, 0, 1, 2)
+        view_layout.addWidget(self.snapshot_zoom_slider, 4, 0, 1, 2)
         self.snapshot_guides_button = QPushButton("Show Guides and Overlays")
         self.snapshot_guides_button.setCheckable(True)
         self.snapshot_guides_button.setChecked(False)
         self.snapshot_guides_button.toggled.connect(
             self._on_snapshot_guides_toggled)
-        view_layout.addWidget(self.snapshot_guides_button, 4, 0, 1, 2)
+        view_layout.addWidget(self.snapshot_guides_button, 5, 0, 1, 2)
         studio_layout.addWidget(view_box)
 
         background_box = QGroupBox("Background")
@@ -1831,6 +1849,7 @@ class AssemblyWindow(QMainWindow):
         background_layout.addWidget(
             self.snapshot_tracy_destination_swatch, 2, 2)
         self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
         studio_layout.addWidget(background_box)
 
         output_box = QGroupBox("Output size")
@@ -4128,7 +4147,6 @@ class AssemblyWindow(QMainWindow):
 
     def _toggle_play(self, playing: bool) -> None:
         self.viewport.play_animation(playing)
-        self.play_button.setText("Pause" if playing else "Play")
         self._notify("Animation playing." if playing else
                      "Animation paused.", 3500)
 
@@ -4146,6 +4164,7 @@ class AssemblyWindow(QMainWindow):
                 self.snapshot_renderer_combo.setCurrentIndex(renderer_index)
                 self.snapshot_renderer_combo.blockSignals(False)
         self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
         if mode != "textured_indexed":
             self._notify(
                 f"Viewport mode changed to {self.mode_combo.currentText()}.",
@@ -4164,6 +4183,7 @@ class AssemblyWindow(QMainWindow):
             self.mode_combo.setCurrentIndex(toolbar_index)
             self.mode_combo.blockSignals(False)
         self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
         if mode != "textured_indexed":
             self._notify(
                 f"Snapshot renderer changed to "
@@ -4181,6 +4201,27 @@ class AssemblyWindow(QMainWindow):
     def _on_flat_tracy_destination_index_changed(self, value: int) -> None:
         self.viewport.set_flat_tracy_forced_destination_index(value)
         self._update_flat_tracy_destination_controls()
+
+    def _on_retail_area_distance_fade_toggled(self, enabled: bool) -> None:
+        """Apply the explicit near-gameplay AREA fade profile."""
+
+        self.viewport.set_retail_area_distance_fade_enabled(bool(enabled))
+        self._update_retail_area_distance_fade_control()
+
+    def _update_retail_area_distance_fade_control(self) -> None:
+        checkbox = getattr(self, "snapshot_distance_fade_check", None)
+        renderer = getattr(self, "snapshot_renderer_combo", None)
+        if checkbox is None:
+            return
+        enabled = bool(
+            renderer is not None
+            and renderer.currentData() == "textured_indexed")
+        checkbox.setEnabled(enabled)
+        configured = self.viewport.retail_area_distance_fade_enabled
+        if checkbox.isChecked() != configured:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(configured)
+            checkbox.blockSignals(False)
 
     def _update_flat_tracy_destination_controls(self) -> None:
         combo = getattr(self, "snapshot_tracy_destination_combo", None)
@@ -4246,8 +4287,8 @@ class AssemblyWindow(QMainWindow):
         """Match controls and playback to the rendered selected subtree.
 
         Rebuilding the selected subtree recreates viewport materials and stops
-        its timer.  When the toolbar still says Pause, resume the timer instead
-        of leaving a false playing state in the UI.
+        its timer.  Preserve the user's checkbox preference so a later
+        animated selection can resume without catching up paused wall time.
         """
 
         has_anim = self.viewport.has_animation
@@ -4256,13 +4297,8 @@ class AssemblyWindow(QMainWindow):
         self.speed_spin.setEnabled(has_anim)
         self._update_snapshot_frame_text()
         if not has_anim:
-            if self.play_button.isChecked():
-                self.play_button.setChecked(False)
-            self.play_button.setText("Play")
             self.viewport.play_animation(False)
             return
-        self.play_button.setText(
-            "Pause" if self.play_button.isChecked() else "Play")
         self.viewport.play_animation(self.play_button.isChecked())
 
     def _on_nested_tab_changed(self, _index: int) -> None:
@@ -4453,6 +4489,7 @@ class AssemblyWindow(QMainWindow):
                            self.mapping_diag_check):
                 action.setEnabled(False)
             self._update_flat_tracy_destination_controls()
+            self._update_retail_area_distance_fade_control()
             self._on_snapshot_preset_changed(
                 self.snapshot_view_combo.currentText())
         elif not entering and self._snapshot_mode_active:
@@ -4482,6 +4519,7 @@ class AssemblyWindow(QMainWindow):
                            self.mapping_diag_check):
                 action.setEnabled(True)
             self._update_flat_tracy_destination_controls()
+            self._update_retail_area_distance_fade_control()
         self._sync_tab_edit_mode()
         if tabs is not None:
             outer_index = tabs.currentIndex()
@@ -4680,11 +4718,14 @@ class AssemblyWindow(QMainWindow):
         renderer = getattr(self, "snapshot_renderer_combo", None)
         if renderer is None or renderer.currentData() != "textured_indexed":
             return ""
-        if self.viewport.flat_tracy_destination_mode != "forced_diagnostic":
-            return ""
-        return (
-            "_TRACY_FORCE_"
-            f"{self.viewport.flat_tracy_destination_index:03d}_DIAGNOSTIC")
+        parts = []
+        if self.viewport.retail_area_distance_fade_enabled:
+            parts.append("DFADE")
+        if self.viewport.flat_tracy_destination_mode == "forced_diagnostic":
+            parts.append(
+                "TRACY_FORCE_"
+                f"{self.viewport.flat_tracy_destination_index:03d}_DIAGNOSTIC")
+        return "_" + "_".join(parts) if parts else ""
 
     def _export_snapshot(self) -> None:
         if not self.viewport.has_model:

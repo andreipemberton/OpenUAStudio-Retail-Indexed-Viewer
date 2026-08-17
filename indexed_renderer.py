@@ -47,6 +47,82 @@ Point2 = tuple[float, float]
 Point3 = tuple[float, float, float]
 
 
+@dataclass(frozen=True)
+class IndexedDistanceFadeProfile:
+    """Validated opt-in AREA distance-fade parameters.
+
+    Camera vertices used by :class:`IndexedPiece` are in the viewer's
+    normalized camera space, whose eye is ``(0, 0, 4)``.  The caller must
+    therefore provide ``source_distance_scale=1/camera_scale`` so radial
+    distances are converted back to source-model units before the retail
+    visibility profile is applied.
+
+    The defaults are the near-gameplay values recovered from the retail
+    runtime.  Merely constructing the default profile does not enable the
+    effect; callers must opt in explicitly.
+    """
+
+    enabled: bool = False
+    visibility_limit: float = 1400.0
+    fade_length: float = 600.0
+    source_distance_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("distance-fade enabled must be a boolean")
+        values: dict[str, float] = {}
+        for field_name in (
+                "visibility_limit", "fade_length", "source_distance_scale"):
+            raw = getattr(self, field_name)
+            if isinstance(raw, bool):
+                raise TypeError(f"distance-fade {field_name} must be a number")
+            try:
+                value = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"distance-fade {field_name} must be a number") from exc
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(
+                    f"distance-fade {field_name} must be finite and positive")
+            values[field_name] = value
+        if values["fade_length"] > values["visibility_limit"]:
+            raise ValueError(
+                "distance-fade fade_length cannot exceed visibility_limit")
+        for field_name, value in values.items():
+            object.__setattr__(self, field_name, value)
+
+    @property
+    def fade_start(self) -> float:
+        return self.visibility_limit - self.fade_length
+
+    @property
+    def profile_name(self) -> str:
+        if (self.visibility_limit == 1400.0
+                and self.fade_length == 600.0):
+            return "retail_gameplay_near_1400_600"
+        return "custom"
+
+    @property
+    def channel_signature(self) -> tuple[float, float, float]:
+        """Bind precomputed vertex brightness to its exact source profile."""
+
+        return (
+            self.visibility_limit,
+            self.fade_length,
+            self.source_distance_scale,
+        )
+
+    def to_metadata(self) -> dict[str, object]:
+        return {
+            "name": self.profile_name,
+            "enabled": self.enabled,
+            "visibility_limit": self.visibility_limit,
+            "fade_length": self.fade_length,
+            "fade_start": self.fade_start,
+            "source_distance_scale": self.source_distance_scale,
+        }
+
+
 def _u8(value, label: str) -> int:
     if isinstance(value, bool):
         raise TypeError(f"{label} must contain integers, not booleans")
@@ -387,6 +463,9 @@ class IndexedSurface:
     shade_value: int
     tracy_mode: str
     map_mode: str
+    authored_shade_value: int | None = None
+    authored_depth_fade_flag: bool = False
+    distance_fade_eligible: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
@@ -398,6 +477,15 @@ class IndexedSurface:
             self.tracy_mode, "TRACY mode", ("none", "clear", "flat"))
         map_mode = _enum(self.map_mode, "map mode", ("linear", "depth"))
         shade_value = _u8(self.shade_value, "shade value")
+        authored_shade_value = (
+            None
+            if self.authored_shade_value is None
+            else _u8(self.authored_shade_value, "authored shade value")
+        )
+        if not isinstance(self.authored_depth_fade_flag, bool):
+            raise TypeError("authored_depth_fade_flag must be a boolean")
+        if not isinstance(self.distance_fade_eligible, bool):
+            raise TypeError("distance_fade_eligible must be a boolean")
 
         try:
             width = operator.index(self.width)
@@ -427,6 +515,23 @@ class IndexedSurface:
             indices = None
             chroma = None
 
+        if self.distance_fade_eligible:
+            if not self.authored_depth_fade_flag:
+                raise ValueError(
+                    "distance-fade eligibility requires the authored AREA flag")
+            if authored_shade_value is None:
+                raise ValueError(
+                    "distance-fade eligibility requires an authored shade value")
+            if kind != "texture":
+                raise ValueError(
+                    "distance-fade eligibility requires a mapped texture")
+            if tracy_mode == "flat":
+                raise ValueError("flat TRACY/LNF cannot use distance fade")
+            if shade_mode not in ("none", "gradient"):
+                raise ValueError(
+                    "distance-fade eligibility requires a retail gradient "
+                    "shade routine")
+
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "indices", indices)
         object.__setattr__(self, "width", width)
@@ -437,6 +542,7 @@ class IndexedSurface:
         object.__setattr__(self, "shade_value", shade_value)
         object.__setattr__(self, "tracy_mode", tracy_mode)
         object.__setattr__(self, "map_mode", map_mode)
+        object.__setattr__(self, "authored_shade_value", authored_shade_value)
 
 
 @dataclass(frozen=True)
@@ -451,6 +557,13 @@ class IndexedPiece:
     surface: IndexedSurface
     source_order: int = 0
     sort_depth: float = 0.0
+    # Optional source-derived AREA brightness, evaluated after the viewer's
+    # 3-D near clip and carried through any viewer-only BSP split. Supplying
+    # both channels prevents radial distance from being recomputed at a BSP
+    # intersection that did not exist in the retail pipeline.
+    vertex_brightness: tuple[float, ...] = ()
+    vertex_shade_fixed: tuple[float, ...] = ()
+    vertex_distance_fade_signature: tuple[float, ...] = ()
 
     def __post_init__(self) -> None:
         try:
@@ -485,6 +598,50 @@ class IndexedPiece:
             raise ValueError("texture UVs must match the screen polygon")
         if self.surface.kind == "solid" and len(uvs) not in (0, len(screen)):
             raise ValueError("solid UVs must be empty or match the screen polygon")
+        try:
+            vertex_brightness = tuple(
+                float(value) for value in self.vertex_brightness)
+            vertex_shade_fixed = tuple(
+                float(value) for value in self.vertex_shade_fixed)
+            vertex_distance_fade_signature = tuple(
+                float(value)
+                for value in self.vertex_distance_fade_signature)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "distance-fade vertex channels must contain numbers") from exc
+        if bool(vertex_brightness) != bool(vertex_shade_fixed):
+            raise ValueError(
+                "distance-fade brightness and fixed channels must be supplied "
+                "together")
+        if bool(vertex_brightness) != bool(vertex_distance_fade_signature):
+            raise ValueError(
+                "precomputed distance-fade channels require their profile "
+                "signature")
+        if vertex_distance_fade_signature \
+                and len(vertex_distance_fade_signature) != 3:
+            raise ValueError(
+                "distance-fade profile signature must contain visibility "
+                "limit, fade length, and source-distance scale")
+        if vertex_brightness and len(vertex_brightness) != len(screen):
+            raise ValueError(
+                "distance-fade vertex channels must match the screen polygon")
+        if vertex_shade_fixed and len(vertex_shade_fixed) != len(screen):
+            raise ValueError(
+                "distance-fade vertex channels must match the screen polygon")
+        if any(not math.isfinite(value) or not 0.0 <= value <= 1.0
+               for value in vertex_brightness):
+            raise ValueError(
+                "distance-fade vertex brightness must be finite in [0, 1]")
+        if any(not math.isfinite(value) or not 0x180 <= value <= 0xFE80
+               for value in vertex_shade_fixed):
+            raise ValueError(
+                "distance-fade fixed vertex values must be finite and in "
+                "the source range 0x180..0xFE80")
+        if any(not math.isfinite(value) or value <= 0.0
+               for value in vertex_distance_fade_signature):
+            raise ValueError(
+                "distance-fade profile signature values must be finite and "
+                "positive")
 
         object.__setattr__(self, "polygon_id", polygon_id)
         object.__setattr__(self, "source_order", source_order)
@@ -492,6 +649,143 @@ class IndexedPiece:
         object.__setattr__(self, "screen", screen)
         object.__setattr__(self, "uvs", uvs)
         object.__setattr__(self, "camera_vertices", camera)
+        object.__setattr__(self, "vertex_brightness", vertex_brightness)
+        object.__setattr__(self, "vertex_shade_fixed", vertex_shade_fixed)
+        object.__setattr__(
+            self, "vertex_distance_fade_signature",
+            vertex_distance_fade_signature)
+
+
+@dataclass(frozen=True)
+class _PieceDistanceFade:
+    """Prepared per-piece brightness state for one validated profile."""
+
+    mode: str
+    vertex_shade_fixed: tuple[float, ...] = ()
+
+
+INDEXED_DISTANCE_FADE_FORMULA = (
+    "b=clamp(authored_shade/256 + max(0, "
+    "(radial_source_distance-fade_start)/fade_length), 0, 1); "
+    "vertex_fixed=rint(b*64768)+0x180; SHADERMP row is the "
+    "screen-linear interpolated fixed value's high byte"
+)
+
+
+def _prepare_distance_fade(
+        pieces: Sequence[IndexedPiece],
+        profile: IndexedDistanceFadeProfile) -> tuple[_PieceDistanceFade, ...]:
+    # BSP may split one authored polygon into several pieces. Retail performs
+    # its all-white/all-black shortcut once for the complete published source
+    # polygon, so all fragments carrying the same source_face_id must share the
+    # shortcut decision. Classifying fragments independently can otherwise
+    # turn only the far side of a clear polygon into an opaque black seam.
+    brightness_by_piece: list[tuple[float, ...] | None] = []
+    fixed_by_piece: list[tuple[float, ...] | None] = []
+    brightness_by_face: dict[Hashable, list[float]] = {}
+    for piece in pieces:
+        surface = piece.surface
+        if not profile.enabled or not surface.distance_fade_eligible:
+            brightness_by_piece.append(None)
+            fixed_by_piece.append(None)
+            continue
+        if piece.vertex_brightness:
+            if piece.vertex_distance_fade_signature \
+                    != profile.channel_signature:
+                raise ValueError(
+                    "precomputed distance-fade vertex channels do not match "
+                    "the active profile")
+            values = piece.vertex_brightness
+            fixed_values = piece.vertex_shade_fixed
+        else:
+            assert surface.authored_shade_value is not None
+            authored = surface.authored_shade_value / 256.0
+            brightness: list[float] = []
+            for x, y, z in piece.camera_vertices:
+                distance = math.sqrt(
+                    x * x + y * y + (_CAMERA_DISTANCE - z) ** 2
+                ) * profile.source_distance_scale
+                fade = max(
+                    0.0,
+                    (distance - profile.fade_start) / profile.fade_length)
+                brightness.append(min(1.0, max(0.0, authored + fade)))
+            values = tuple(brightness)
+            fixed_values = tuple(
+                float(int(round(value * 64768.0)) + 0x180)
+                for value in values)
+        brightness_by_piece.append(values)
+        fixed_by_piece.append(fixed_values)
+        brightness_by_face.setdefault(piece.source_face_id, []).extend(values)
+
+    mode_by_face: dict[Hashable, str] = {}
+    for source_face_id, values in brightness_by_face.items():
+        if all(value < 0.01 for value in values):
+            mode_by_face[source_face_id] = "bypass"
+        elif all(value > 0.99 for value in values):
+            mode_by_face[source_face_id] = "black"
+        else:
+            mode_by_face[source_face_id] = "dynamic"
+
+    prepared: list[_PieceDistanceFade] = []
+    for piece, brightness, fixed_values in zip(
+            pieces, brightness_by_piece, fixed_by_piece):
+        if brightness is None:
+            prepared.append(_PieceDistanceFade("inactive"))
+            continue
+        mode = mode_by_face[piece.source_face_id]
+        if mode != "dynamic":
+            prepared.append(_PieceDistanceFade(mode))
+            continue
+        assert fixed_values is not None
+        prepared.append(_PieceDistanceFade("dynamic", fixed_values))
+    return tuple(prepared)
+
+
+def _distance_fade_stats(
+        profile: IndexedDistanceFadeProfile,
+        pieces: Sequence[IndexedPiece],
+        prepared: Sequence[_PieceDistanceFade]) -> dict[str, object]:
+    flagged = sum(
+        1 for piece in pieces if piece.surface.authored_depth_fade_flag)
+    eligible = sum(
+        1 for piece in pieces if piece.surface.distance_fade_eligible)
+    mode_counts = Counter(state.mode for state in prepared)
+    effective = int(
+        mode_counts.get("bypass", 0)
+        + mode_counts.get("black", 0)
+        + mode_counts.get("dynamic", 0)
+    )
+    return {
+        "distance_fade_requested": profile.enabled,
+        "distance_fade_effective": bool(profile.enabled and effective),
+        "distance_fade_profile": profile.to_metadata(),
+        "distance_fade_formula": INDEXED_DISTANCE_FADE_FORMULA,
+        "distance_fade_flagged_piece_count": flagged,
+        "distance_fade_authored_flagged_piece_count": flagged,
+        "distance_fade_eligible_piece_count": eligible,
+        "distance_fade_effective_piece_count": effective,
+        "distance_fade_bypass_piece_count": int(
+            mode_counts.get("bypass", 0)),
+        "distance_fade_dynamic_piece_count": int(
+            mode_counts.get("dynamic", 0)),
+        "distance_fade_black_piece_count": int(
+            mode_counts.get("black", 0)),
+        "distance_fade_whole_polygon_scope": (
+            "all BSP fragments sharing one source_face_id are classified "
+            "together; viewer fan/near clipping remains a bounded "
+            "reconstruction of the retail whole-polygon clipper"
+        ),
+        "distance_fade_changed_sample_scope": (
+            "dynamic SHADERMP samples compared with the disabled constant "
+            "path; full-black ZeroSpan samples are excluded"
+        ),
+        "distance_fade_vertex_channel_piece_count": sum(
+            1 for piece in pieces if piece.vertex_brightness),
+        "distance_fade_vertex_channel_space": (
+            "brightness evaluated after viewer near clipping and carried "
+            "through viewer BSP interpolation; raster brightness remains "
+            "screen-linear"),
+    }
 
 
 @dataclass(frozen=True)
@@ -569,6 +863,8 @@ _COUNTER_KEYS = (
     "flat_tracy_duplicate_samples_skipped",
     "transparent_samples_occluded",
     "opaque_or_clear_samples",
+    "distance_fade_samples",
+    "distance_fade_dynamic_changed_samples",
 )
 
 
@@ -666,6 +962,8 @@ def _finish_stats(
         "tracy_lookup_axis_order": "TRACYRMP[background][raw_source]",
         "final_visible_polygon_owners": owners,
     })
+    stats["distance_fade_changed_samples"] = stats[
+        "distance_fade_dynamic_changed_samples"]
     return stats
 
 
@@ -694,11 +992,16 @@ def _sample_coordinate(value: float, size: int) -> int:
     return min(size - 1, max(0, coordinate))
 
 
-def _transparent_replay_metadata(schedule) -> dict[str, object]:
+def _transparent_replay_metadata(
+        schedule, distance_fade_states=None) -> dict[str, object]:
     seen: set[Hashable] = set()
     faces: list[dict[str, object]] = []
-    for _input_order, piece in schedule:
-        if (piece.surface.tracy_mode == "none"
+    for input_order, piece in schedule:
+        fade_black = (
+            distance_fade_states is not None
+            and distance_fade_states[input_order].mode == "black"
+        )
+        if (fade_black or piece.surface.tracy_mode == "none"
                 or piece.source_face_id in seen):
             continue
         seen.add(piece.source_face_id)
@@ -724,7 +1027,7 @@ class IndexedRasterizer:
     max_safe_pixels = MAX_SAFE_PIXELS
 
     @staticmethod
-    def _retail_pass_order(pieces):
+    def _retail_pass_order(pieces, distance_fade_states=None):
         """Replay transparent source faces after opaque BSP pieces.
 
         The retail software spangine pushes clear/LUM-TRACY spans while the
@@ -737,10 +1040,21 @@ class IndexedRasterizer:
         """
 
         indexed = list(enumerate(pieces))
+        states = (
+            distance_fade_states
+            if distance_fade_states is not None
+            else (_PieceDistanceFade("inactive"),) * len(indexed)
+        )
+
+        def is_effectively_opaque(item) -> bool:
+            input_order, piece = item
+            return (states[input_order].mode == "black"
+                    or piece.surface.tracy_mode == "none")
+
         opaque = [item for item in indexed
-                  if item[1].surface.tracy_mode == "none"]
+                  if is_effectively_opaque(item)]
         transparent = [item for item in indexed
-                       if item[1].surface.tracy_mode != "none"]
+                       if not is_effectively_opaque(item)]
         transparent.sort(
             key=lambda item: (
                 item[1].sort_depth, item[1].source_order, item[0]),
@@ -752,6 +1066,7 @@ class IndexedRasterizer:
             width: int, height: int, pieces: Iterable[IndexedPiece],
             tables: IndexedTables, background_index: int = 0,
             flat_tracy_destination_override: int | None = None,
+            distance_fade_profile: IndexedDistanceFadeProfile | None = None,
             ) -> IndexedRenderResult:
         """Render an indexed frame, optionally forcing only flat-TRACY reads.
 
@@ -759,7 +1074,9 @@ class IndexedRasterizer:
         override is intentionally separate: it substitutes the TRACYRMP row
         for every flat/LUM-TRACY lookup while output, coverage, and occlusion
         continue to operate on the real framebuffer.  That override is a
-        diagnostic primitive, not retail live-destination compositing.
+        diagnostic primitive, not retail live-destination compositing.  An
+        enabled ``distance_fade_profile`` applies recovered per-vertex AREA
+        brightness only to surfaces the structural adapter marked eligible.
         """
 
         try:
@@ -783,26 +1100,39 @@ class IndexedRasterizer:
         ordered = tuple(pieces)
         if not all(isinstance(piece, IndexedPiece) for piece in ordered):
             raise TypeError("pieces must contain only IndexedPiece objects")
+        if distance_fade_profile is None:
+            distance_fade_profile = IndexedDistanceFadeProfile()
+        elif not isinstance(
+                distance_fade_profile, IndexedDistanceFadeProfile):
+            raise TypeError(
+                "distance_fade_profile must be an "
+                "IndexedDistanceFadeProfile or None")
+        distance_fade_states = _prepare_distance_fade(
+            ordered, distance_fade_profile)
 
         if _np is not None:
             return IndexedRasterizer._render_numpy(
                 width, height, ordered, tables, background,
-                forced_destination)
+                forced_destination, distance_fade_profile,
+                distance_fade_states)
         return IndexedRasterizer._render_python(
             width, height, ordered, tables, background,
-            forced_destination)
+            forced_destination, distance_fade_profile,
+            distance_fade_states)
 
     @staticmethod
     def _render_numpy(
             width, height, pieces, tables, background,
-            forced_tracy_destination):
+            forced_tracy_destination, distance_fade_profile,
+            distance_fade_states):
         framebuffer = _np.full(
             (height, width), background, dtype=_np.uint8)
         coverage = _np.zeros((height, width), dtype=bool)
         polygon_owner = _np.full((height, width), -1, dtype=_np.int64)
         opaque_order = _np.full((height, width), -1, dtype=_np.int64)
         counters = Counter()
-        schedule = IndexedRasterizer._retail_pass_order(pieces)
+        schedule = IndexedRasterizer._retail_pass_order(
+            pieces, distance_fade_states)
 
         flat_face_ids = []
         flat_face_set = set()
@@ -861,6 +1191,7 @@ class IndexedRasterizer:
                     else sparse_seen[piece.source_face_id]
                     if piece.surface.tracy_mode == "flat" else None,
                     piece, input_order, tri_screen, tri_uvs, tri_camera,
+                    distance_fade_states[input_order], tri_indices,
                     shader, tracy, counters, forced_tracy_destination,
                 )
 
@@ -868,7 +1199,10 @@ class IndexedRasterizer:
             counters, width, height, pieces,
             framebuffer, coverage, polygon_owner, background,
             forced_tracy_destination)
-        stats.update(_transparent_replay_metadata(schedule))
+        stats.update(_transparent_replay_metadata(
+            schedule, distance_fade_states))
+        stats.update(_distance_fade_stats(
+            distance_fade_profile, pieces, distance_fade_states))
         return IndexedRenderResult(
             width, height, framebuffer, coverage, polygon_owner, stats)
 
@@ -877,6 +1211,7 @@ class IndexedRasterizer:
             framebuffer, coverage, polygon_owner, opaque_order,
             flat_seen, flat_face_bit, sparse_seen,
             piece, input_order, screen, uvs, camera_vertices,
+            distance_fade_state, triangle_indices,
             shader, tracy, counters, forced_tracy_destination):
         height, width = framebuffer.shape
         left, right, top, bottom = _triangle_bbox(screen, width, height)
@@ -889,7 +1224,12 @@ class IndexedRasterizer:
             return
 
         surface = piece.surface
-        if surface.kind == "solid":
+        fade_black = distance_fade_state.mode == "black"
+        fade_bypass = distance_fade_state.mode == "bypass"
+        fade_dynamic = distance_fade_state.mode == "dynamic"
+        effective_solid = surface.kind == "solid" or fade_black
+        effective_tracy_mode = "none" if fade_black else surface.tracy_mode
+        if effective_solid:
             counters["solid_color_triangles"] += 1
         elif surface.map_mode == "linear":
             counters["linear_mapped_triangles"] += 1
@@ -902,9 +1242,10 @@ class IndexedRasterizer:
         grid_x = _np.arange(left, right + 1, dtype=_np.float64)[None, :] + 0.5
         uv_array = (
             _np.asarray(uvs, dtype=_np.float64)
-            if surface.kind == "texture" else None)
+            if surface.kind == "texture" and not fade_black else None)
         reciprocal_depth = None
-        if surface.kind == "texture" and surface.map_mode == "depth":
+        if (surface.kind == "texture" and not fade_black
+                and surface.map_mode == "depth"):
             reciprocal_depth = _np.asarray([
                 1.0 / max(_MINIMUM_DEPTH, _CAMERA_DISTANCE - vertex[2])
                 for vertex in camera_vertices
@@ -912,7 +1253,14 @@ class IndexedRasterizer:
         texture = (
             _np.frombuffer(surface.indices, dtype=_np.uint8).reshape(
                 surface.height, surface.width)
-            if surface.kind == "texture" else None)
+            if surface.kind == "texture" and not fade_black else None)
+        triangle_shade_fixed = (
+            _np.asarray([
+                distance_fade_state.vertex_shade_fixed[item]
+                for item in triangle_indices
+            ], dtype=_np.float64)
+            if fade_dynamic else None
+        )
         for strip_top in range(top, bottom + 1, 64):
             strip_bottom = min(bottom + 1, strip_top + 64)
             grid_y = (
@@ -966,9 +1314,11 @@ class IndexedRasterizer:
             w0 = weight0[row_local, column_local]
             w1 = weight1[row_local, column_local]
             w2 = weight2[row_local, column_local]
-            if surface.kind == "solid":
+            if effective_solid:
                 raw_source = _np.full(
-                    row_local.size, surface.solid_index, dtype=_np.uint8)
+                    row_local.size,
+                    0 if fade_black else surface.solid_index,
+                    dtype=_np.uint8)
                 counters["solid_color_samples"] += int(raw_source.size)
             elif surface.map_mode == "linear":
                 u = w0 * uv_array[0, 0] + w1 * uv_array[1, 0] \
@@ -983,6 +1333,7 @@ class IndexedRasterizer:
                     (v / 256.0 * surface.height).astype(_np.int64),
                     0, surface.height - 1)
                 raw_source = texture[source_y, source_x]
+
             else:
                 perspective_total = (
                     w0 * reciprocal_depth[0]
@@ -1019,11 +1370,24 @@ class IndexedRasterizer:
                     0, surface.height - 1)
                 raw_source = texture[source_y, source_x]
 
+            shade_rows = None
+            if fade_dynamic:
+                shade_fixed = (
+                    w0 * triangle_shade_fixed[0]
+                    + w1 * triangle_shade_fixed[1]
+                    + w2 * triangle_shade_fixed[2]
+                )
+                shade_rows = _np.clip(
+                    _np.floor(shade_fixed / 256.0).astype(_np.int64),
+                    0, 255,
+                )
+
             # The original ordinary mapped span writes every raw texel.  Its
             # clear-TRACY sibling skips only numeric source index zero before
             # SHADERMP; it does not search the palette for a chroma RGB.  The
             # flat LNF span passes zero through TRACYRMP instead.
-            if surface.kind == "texture" and surface.tracy_mode == "clear":
+            if (not fade_black and surface.kind == "texture"
+                    and effective_tracy_mode == "clear"):
                 visible = raw_source != 0
                 if not _np.all(visible):
                     skipped = int(_np.count_nonzero(~visible))
@@ -1034,10 +1398,12 @@ class IndexedRasterizer:
                     destination_y = destination_y[visible]
                     destination_x = destination_x[visible]
                     raw_source = raw_source[visible]
+                    if shade_rows is not None:
+                        shade_rows = shade_rows[visible]
             if not raw_source.size:
                 continue
 
-            if surface.tracy_mode != "none":
+            if effective_tracy_mode != "none":
                 visible = (
                     opaque_order[destination_y, destination_x] <= input_order)
                 if not _np.all(visible):
@@ -1046,10 +1412,12 @@ class IndexedRasterizer:
                     destination_y = destination_y[visible]
                     destination_x = destination_x[visible]
                     raw_source = raw_source[visible]
+                    if shade_rows is not None:
+                        shade_rows = shade_rows[visible]
             if not raw_source.size:
                 continue
 
-            if surface.tracy_mode == "flat":
+            if effective_tracy_mode == "flat":
                 background = framebuffer[destination_y, destination_x]
                 # Original span_lnf is explicitly "linear mapped, no shade,
                 # remap Tracy": raw texels bypass SHADERMP and index the low
@@ -1077,27 +1445,49 @@ class IndexedRasterizer:
                         (destination_y.astype(_np.int64) * width
                          + destination_x).tolist())
             else:  # none and clear are both ordinary shaded overwrite modes.
-                mapped_source = (
-                    shader[surface.shade_value, raw_source]
-                    if surface.shade_mode != "none" else raw_source)
+                if fade_black:
+                    mapped_source = raw_source
+                    counters["distance_fade_samples"] += int(
+                        mapped_source.size)
+                elif fade_bypass:
+                    # The source clears the shade flag for an all-white
+                    # depth-faded polygon, even if the structural dispatch was
+                    # authored as gradient-shaded.
+                    mapped_source = raw_source
+                elif fade_dynamic:
+                    mapped_source = shader[shade_rows, raw_source]
+                    baseline = (
+                        shader[surface.shade_value, raw_source]
+                        if surface.shade_mode != "none" else raw_source
+                    )
+                    counters["distance_fade_samples"] += int(
+                        mapped_source.size)
+                    counters["distance_fade_dynamic_changed_samples"] += int(
+                        _np.count_nonzero(mapped_source != baseline))
+                else:
+                    mapped_source = (
+                        shader[surface.shade_value, raw_source]
+                        if surface.shade_mode != "none" else raw_source)
                 counters["opaque_or_clear_samples"] += int(mapped_source.size)
                 framebuffer[destination_y, destination_x] = mapped_source
                 coverage[destination_y, destination_x] = True
                 polygon_owner[destination_y, destination_x] = piece.polygon_id
-                if surface.tracy_mode == "none":
+                if effective_tracy_mode == "none":
                     opaque_order[destination_y, destination_x] = input_order
 
     @staticmethod
     def _render_python(
             width, height, pieces, tables, background,
-            forced_tracy_destination):
+            forced_tracy_destination, distance_fade_profile,
+            distance_fade_states):
         framebuffer = [[background for _ in range(width)] for _ in range(height)]
         coverage = [[False for _ in range(width)] for _ in range(height)]
         polygon_owner = [[-1 for _ in range(width)] for _ in range(height)]
         opaque_order = [[-1 for _ in range(width)] for _ in range(height)]
         flat_seen: dict[Hashable, set[int]] = {}
         counters = Counter()
-        schedule = IndexedRasterizer._retail_pass_order(pieces)
+        schedule = IndexedRasterizer._retail_pass_order(
+            pieces, distance_fade_states)
 
         for input_order, piece in schedule:
             counters["ordered_pieces"] += 1
@@ -1116,13 +1506,17 @@ class IndexedRasterizer:
                     framebuffer, coverage, polygon_owner, opaque_order,
                     flat_seen.get(piece.source_face_id), piece,
                     input_order, screen, uvs, camera, tables, counters,
-                    forced_tracy_destination)
+                    forced_tracy_destination,
+                    distance_fade_states[input_order], tri_indices)
 
         stats = _finish_stats(
             counters, width, height, pieces,
             framebuffer, coverage, polygon_owner, background,
             forced_tracy_destination)
-        stats.update(_transparent_replay_metadata(schedule))
+        stats.update(_transparent_replay_metadata(
+            schedule, distance_fade_states))
+        stats.update(_distance_fade_stats(
+            distance_fade_profile, pieces, distance_fade_states))
         return IndexedRenderResult(
             width, height, framebuffer, coverage, polygon_owner, stats)
 
@@ -1130,7 +1524,7 @@ class IndexedRasterizer:
     def _triangle_python(
             framebuffer, coverage, polygon_owner, opaque_order, face_seen,
             piece, input_order, screen, uvs, camera_vertices, tables, counters,
-            forced_tracy_destination):
+            forced_tracy_destination, distance_fade_state, triangle_indices):
         height = len(framebuffer)
         width = len(framebuffer[0])
         left, right, top, bottom = _triangle_bbox(screen, width, height)
@@ -1143,7 +1537,12 @@ class IndexedRasterizer:
             return
 
         surface = piece.surface
-        if surface.kind == "solid":
+        fade_black = distance_fade_state.mode == "black"
+        fade_bypass = distance_fade_state.mode == "bypass"
+        fade_dynamic = distance_fade_state.mode == "dynamic"
+        effective_solid = surface.kind == "solid" or fade_black
+        effective_tracy_mode = "none" if fade_black else surface.tracy_mode
+        if effective_solid:
             counters["solid_color_triangles"] += 1
         elif surface.map_mode == "linear":
             counters["linear_mapped_triangles"] += 1
@@ -1181,8 +1580,8 @@ class IndexedRasterizer:
                     counters["flat_tracy_duplicate_samples_skipped"] += 1
                     continue
 
-                if surface.kind == "solid":
-                    raw_source = surface.solid_index
+                if effective_solid:
+                    raw_source = 0 if fade_black else surface.solid_index
                     counters["solid_color_samples"] += 1
                 else:
                     if surface.map_mode == "linear":
@@ -1211,17 +1610,17 @@ class IndexedRasterizer:
                     source_y = _sample_coordinate(v, surface.height)
                     raw_source = surface.indices[
                         source_y * surface.width + source_x]
-                    if surface.tracy_mode == "clear" and raw_source == 0:
+                    if effective_tracy_mode == "clear" and raw_source == 0:
                         counters["source_chroma_skipped"] += 1
                         counters["clear_source_zero_skipped"] += 1
                         continue
 
-                if (surface.tracy_mode != "none"
+                if (effective_tracy_mode != "none"
                         and opaque_order[y][x] > input_order):
                     counters["transparent_samples_occluded"] += 1
                     continue
 
-                if surface.tracy_mode == "flat":
+                if effective_tracy_mode == "flat":
                     background = framebuffer[y][x]
                     lookup_background = (
                         background
@@ -1239,20 +1638,46 @@ class IndexedRasterizer:
                     framebuffer[y][x] = output
                     face_seen.add(pixel_key)
                 else:
-                    mapped_source = (
-                        tables.shade_index(surface.shade_value, raw_source)
-                        if surface.shade_mode != "none" else raw_source)
+                    if fade_black:
+                        mapped_source = raw_source
+                        counters["distance_fade_samples"] += 1
+                    elif fade_bypass:
+                        # All-white AREA depth fade selects the unshaded span.
+                        mapped_source = raw_source
+                    elif fade_dynamic:
+                        fixed = sum(
+                            weight * distance_fade_state.vertex_shade_fixed[item]
+                            for weight, item in zip(
+                                (w0, w1, w2), triangle_indices)
+                        )
+                        shade_row = min(255, max(0, int(fixed // 256)))
+                        mapped_source = tables.shade_index(
+                            shade_row, raw_source)
+                        baseline = (
+                            tables.shade_index(
+                                surface.shade_value, raw_source)
+                            if surface.shade_mode != "none" else raw_source
+                        )
+                        counters["distance_fade_samples"] += 1
+                        if mapped_source != baseline:
+                            counters[
+                                "distance_fade_dynamic_changed_samples"] += 1
+                    else:
+                        mapped_source = (
+                            tables.shade_index(surface.shade_value, raw_source)
+                            if surface.shade_mode != "none" else raw_source)
                     counters["opaque_or_clear_samples"] += 1
                     framebuffer[y][x] = mapped_source
                     coverage[y][x] = True
                     polygon_owner[y][x] = piece.polygon_id
-                    if surface.tracy_mode == "none":
+                    if effective_tracy_mode == "none":
                         opaque_order[y][x] = input_order
 
 
 __all__ = [
     "ACCELERATION_BACKEND",
     "MAX_SAFE_PIXELS",
+    "IndexedDistanceFadeProfile",
     "IndexedTables",
     "IndexedSurface",
     "IndexedPiece",

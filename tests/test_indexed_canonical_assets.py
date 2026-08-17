@@ -248,6 +248,47 @@ class IndexedCanonicalAssetTests(unittest.TestCase):
         self.assertEqual(stats["flat_tracy_changed_samples"], 8141)
         self.assertEqual(stats["unique_framebuffer_indices"], 153)
 
+    def test_hauptstation_top_retail_gameplay_distance_fade_oracle(self):
+        """Lock the real viewer-to-BSP-to-indexed fade channel path."""
+
+        family = load_asset_family(
+            self.assets / "VP_TAERO.base",
+            [self.set1],
+            {"STANDARD.PAL": self.set1 / "PALETTE" / "Standard.pal"},
+            setbas=self.setbas,
+        )
+        size = QSize(512, 512)
+        viewport = AssetViewport()
+        viewport.load_family(family)
+        viewport.set_mode("textured_indexed")
+        viewport.set_retail_area_distance_fade_enabled(True)
+        viewport.begin_snapshot_mode(QColor("#000000"))
+        viewport.set_animation_time_ms(312.5)
+        viewport.apply_view_preset("Top", size, 88)
+
+        image = viewport.render_snapshot(
+            size, QColor("#000000"), include_guides=False)
+        info = viewport.indexed_renderer_info
+        stats = info["last_render_stats"]
+
+        self.assertFalse(image.isNull())
+        self.assertTrue(info["canonical_retail_destination_policy"])
+        self.assertEqual(
+            info["distance_fade_profile_state"],
+            "retail_gameplay_near_1400_600")
+        self.assertEqual(
+            stats["index_buffer_sha256"],
+            "4a1f60bf81cb28621e3831f461085dbf8ba36b66c47fdd532c8ea5e0fad56c4f",
+        )
+        self.assertEqual(stats["distance_fade_vertex_channel_piece_count"], 85)
+        self.assertEqual(stats["distance_fade_authored_flagged_piece_count"], 66)
+        self.assertEqual(stats["distance_fade_dynamic_piece_count"], 50)
+        self.assertEqual(stats["distance_fade_bypass_piece_count"], 16)
+        self.assertEqual(stats["distance_fade_black_piece_count"], 0)
+        self.assertEqual(stats["distance_fade_dynamic_changed_samples"], 2974)
+        self.assertEqual(stats["covered_pixels"], 127991)
+        self.assertEqual(stats["unique_framebuffer_indices"], 145)
+
     def test_hauptstation_multiview_lightning_oracles(self):
         family = load_asset_family(
             self.assets / "VP_TAERO.base",

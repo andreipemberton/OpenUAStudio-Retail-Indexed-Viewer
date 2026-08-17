@@ -511,6 +511,7 @@ class IndexedFamilyAdapter:
         unsupported: list[str] = []
         unsupported_codes: list[dict[str, Any]] = []
         depth_fade_blocks: list[str] = []
+        depth_fade_eligible_blocks: list[str] = []
         for family_object in self._all_objects():
             owner = str(getattr(family_object, "owner_path", "root"))
             # ViewFace.block_index is assigned from this exact material-group
@@ -546,7 +547,10 @@ class IndexedFamilyAdapter:
                         "retail_dispatch_code": material_code,
                     })
                 if bool(getattr(block, "depth_fade", False)):
-                    depth_fade_blocks.append(f"{owner} block {block_index}")
+                    label = f"{owner} block {block_index}"
+                    depth_fade_blocks.append(label)
+                    if material_code in _RETAIL_GRADIENT_CODES:
+                        depth_fade_eligible_blocks.append(label)
         self.unsupported_mapped_tracy = tuple(unsupported)
         self.source_info["unsupported_mapped_tracy"] = list(unsupported)
         self.source_info["unsupported_material_codes"] = unsupported_codes
@@ -555,11 +559,41 @@ class IndexedFamilyAdapter:
                 "raw 0..2 bypass SHADERMP; raw 3..253 uses row "
                 "(253 * raw + 0x180) >> 8; raw 254..255 becomes opaque index 0"
             ),
-            "depth_fade_emulated": False,
+            "depth_fade_supported": True,
+            "depth_fade_emulated": True,
+            "depth_fade_default_enabled": False,
+            "asset_stores_depth_fade_flag": bool(depth_fade_blocks),
+            "asset_stores_distance_profile": False,
             "depth_fade_blocks": depth_fade_blocks,
-            "depth_fade_limitation": (
-                "Per-vertex AREA_FLAG_DPTHFADE brightness outside dfade_start "
-                "is not emulated by this bounded close-up renderer."
+            "depth_fade_eligible_blocks": depth_fade_eligible_blocks,
+            "available_viewer_profile": {
+                "name": "retail_gameplay_near_1400_600",
+                "visibility_limit": 1400.0,
+                "fade_length": 600.0,
+                "fade_start": 800.0,
+                "profile_origin": "original_normal_gameplay_near_runtime",
+                "camera_context": (
+                    "current auto-fit asset-viewer camera distance; not a "
+                    "recovered mission/world placement"
+                ),
+            },
+            "depth_fade_profile": {
+                "name": "retail_gameplay_near_1400_600",
+                "visibility_limit": 1400.0,
+                "fade_length": 600.0,
+                "fade_start": 800.0,
+                "profile_origin": "original_normal_gameplay_near_runtime",
+                "deprecated_alias_for": "available_viewer_profile",
+            },
+            "depth_fade_formula": (
+                "b=clamp(raw_shade/256 + max(0, "
+                "(radial_source_distance-fade_start)/fade_length), 0, 1); "
+                "vertex_fixed=rint(b*64768)+0x180"
+            ),
+            "depth_fade_scope": (
+                "Opt-in for AREA_FLAG_DPTHFADE blocks using supported retail "
+                "gradient mapped or clear routines; flat LNF and non-gradient "
+                "routines never consume the brightness channel."
             ),
         }
 
@@ -885,6 +919,11 @@ class IndexedFamilyAdapter:
                 if entry is not None else getattr(block, "shade_val", 0)
             )
         raw_shade = _as_byte(shade_source, "shade value")
+        authored_depth_fade = bool(getattr(block, "depth_fade", False))
+        distance_fade_eligible = (
+            authored_depth_fade
+            and material_code in _RETAIL_GRADIENT_CODES
+        )
         shade_mode = (
             "gradient" if material_code in _RETAIL_GRADIENT_CODES else "none")
         shade_value = 0
@@ -907,6 +946,9 @@ class IndexedFamilyAdapter:
                 shade_value=0,
                 tracy_mode="none",
                 map_mode="linear",
+                authored_shade_value=raw_shade,
+                authored_depth_fade_flag=authored_depth_fade,
+                distance_fade_eligible=False,
             )
         elif shade_mode == "gradient":
             shade_value = _retail_constant_shade_row(raw_shade)
@@ -931,6 +973,9 @@ class IndexedFamilyAdapter:
             shade_value=shade_value,
             tracy_mode=tracy_mode,
             map_mode=map_mode,
+            authored_shade_value=raw_shade,
+            authored_depth_fade_flag=authored_depth_fade,
+            distance_fade_eligible=distance_fade_eligible,
         )
 
 
