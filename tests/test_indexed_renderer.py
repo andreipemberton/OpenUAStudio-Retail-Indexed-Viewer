@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import indexed_renderer
 from indexed_renderer import (
+    IndexedDistanceFadeProfile,
     IndexedPiece,
     IndexedRasterizer,
     IndexedSurface,
@@ -81,14 +82,16 @@ def _solid(
 def _texture(
         pixels, width, height, *, name="texture", chroma=(),
         shade_mode="none", shade_value=0, tracy_mode="none",
-        map_mode="linear"):
+        map_mode="linear", authored_shade_value=None,
+        authored_depth_fade_flag=False, distance_fade_eligible=False):
     chroma_by_index = [False] * 256
     for index in chroma:
         chroma_by_index[index] = True
     return IndexedSurface(
         name, "texture", bytes(pixels), width, height,
         tuple(chroma_by_index), None, shade_mode, shade_value,
-        tracy_mode, map_mode,
+        tracy_mode, map_mode, authored_shade_value,
+        authored_depth_fade_flag, distance_fade_eligible,
     )
 
 
@@ -584,6 +587,292 @@ class IndexedRendererTests(unittest.TestCase):
         result = IndexedRasterizer.render(
             1, 1, [_triangle_piece(unshaded)], tables)
         self.assertEqual(_at(result.indices), 7)
+
+    def test_distance_fade_profile_is_validated_and_derives_retail_start(self):
+        profile = IndexedDistanceFadeProfile(enabled=True)
+
+        self.assertEqual(profile.profile_name, "retail_gameplay_near_1400_600")
+        self.assertEqual(profile.fade_start, 800.0)
+        self.assertEqual(profile.to_metadata()["source_distance_scale"], 1.0)
+
+        for field_name, value, exception in (
+                ("enabled", 1, TypeError),
+                ("visibility_limit", 0, ValueError),
+                ("visibility_limit", float("inf"), ValueError),
+                ("fade_length", -1, ValueError),
+                ("source_distance_scale", 0, ValueError),
+                ("source_distance_scale", True, TypeError)):
+            with self.subTest(field=field_name, value=value):
+                arguments = {field_name: value}
+                with self.assertRaises(exception):
+                    IndexedDistanceFadeProfile(**arguments)
+        with self.assertRaisesRegex(ValueError, "cannot exceed"):
+            IndexedDistanceFadeProfile(
+                visibility_limit=500, fade_length=600)
+        with self.assertRaisesRegex(TypeError, "IndexedDistanceFadeProfile"):
+            IndexedRasterizer.render(
+                1, 1, [], _tables(), distance_fade_profile={})
+
+    def test_disabled_distance_fade_preserves_exact_constant_output(self):
+        tables = _tables(shader_changes={(85, 7): 99})
+        surface = _texture(
+            (7,), 1, 1,
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        piece = _triangle_piece(surface)
+
+        original = IndexedRasterizer.render(1, 1, [piece], tables)
+        explicit_off = IndexedRasterizer.render(
+            1, 1, [piece], tables,
+            distance_fade_profile=IndexedDistanceFadeProfile(
+                enabled=False, source_distance_scale=250.0))
+
+        self.assertEqual(_at(original.indices), 7)
+        self.assertEqual(
+            original.stats["index_buffer_sha256"],
+            explicit_off.stats["index_buffer_sha256"],
+        )
+        self.assertFalse(explicit_off.stats["distance_fade_requested"])
+        self.assertFalse(explicit_off.stats["distance_fade_effective"])
+        self.assertEqual(
+            explicit_off.stats["distance_fade_authored_flagged_piece_count"],
+            1,
+        )
+
+    def test_distance_fade_uses_source_radial_distance_and_fixed_shade_row(self):
+        # Normalized radial eye distance is 4.  At source scale 250 this is
+        # 1000 units: b=(1000-800)/600=1/3, whose recovered fixed row is 85.
+        tables = _tables(shader_changes={(85, 7): 99})
+        surface = _texture(
+            (7,), 1, 1,
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        piece = _triangle_piece(surface)
+        profile = IndexedDistanceFadeProfile(
+            enabled=True, source_distance_scale=250.0)
+
+        accelerated = IndexedRasterizer.render(
+            1, 1, [piece], tables, distance_fade_profile=profile)
+        with patch.object(indexed_renderer, "_np", None):
+            fallback = IndexedRasterizer.render(
+                1, 1, [piece], tables, distance_fade_profile=profile)
+
+        self.assertEqual(_at(accelerated.indices), 99)
+        self.assertEqual(_at(fallback.indices), 99)
+        self.assertTrue(accelerated.stats["distance_fade_requested"])
+        self.assertTrue(accelerated.stats["distance_fade_effective"])
+        self.assertEqual(
+            accelerated.stats["distance_fade_profile"]["fade_start"], 800.0)
+        self.assertEqual(
+            accelerated.stats["distance_fade_dynamic_piece_count"], 1)
+        self.assertEqual(accelerated.stats["distance_fade_samples"], 1)
+        self.assertEqual(
+            accelerated.stats["distance_fade_dynamic_changed_samples"], 1)
+        self.assertEqual(accelerated.stats["distance_fade_changed_samples"], 1)
+        self.assertEqual(
+            accelerated.stats["index_buffer_sha256"],
+            fallback.stats["index_buffer_sha256"],
+        )
+
+    def test_distance_fade_interpolates_vertex_fixed_brightness_in_screen_space(self):
+        tables = _tables(shader_changes={(33, 7): 77, (32, 7): 66})
+        surface = _texture(
+            (7,), 1, 1,
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        piece = _triangle_piece(
+            surface,
+            screen=((0.0, 0.0), (2.0, 0.0), (0.0, 2.0)),
+            # At scale 200 these radial distances are 800, 1100, 800.
+            camera=((0.0, 0.0, 0.0),
+                    (0.0, 0.0, -1.5),
+                    (0.0, 0.0, 0.0)),
+        )
+        profile = IndexedDistanceFadeProfile(
+            enabled=True, source_distance_scale=200.0)
+
+        accelerated = IndexedRasterizer.render(
+            2, 2, [piece], tables, distance_fade_profile=profile)
+        with patch.object(indexed_renderer, "_np", None):
+            fallback = IndexedRasterizer.render(
+                2, 2, [piece], tables, distance_fade_profile=profile)
+
+        # At pixel centre (.5,.5), screen weights are .5,.25,.25.  Interpolated
+        # fixed brightness is 8480, selecting high-byte row 33.
+        self.assertEqual(_at(accelerated.indices, 0, 0), 77)
+        self.assertEqual(_at(fallback.indices, 0, 0), 77)
+        self.assertEqual(
+            accelerated.stats["index_buffer_sha256"],
+            fallback.stats["index_buffer_sha256"],
+        )
+
+    def test_distance_fade_full_black_uses_opaque_zerospan_before_clear_skip(self):
+        surface = _texture(
+            (0,), 1, 1, tracy_mode="clear",
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        piece = _triangle_piece(surface)
+        disabled = IndexedRasterizer.render(1, 1, [piece], _tables())
+        enabled = IndexedRasterizer.render(
+            1, 1, [piece], _tables(),
+            distance_fade_profile=IndexedDistanceFadeProfile(
+                enabled=True, source_distance_scale=350.0))
+
+        self.assertFalse(bool(disabled.coverage[0][0]))
+        self.assertTrue(bool(enabled.coverage[0][0]))
+        self.assertEqual(_at(enabled.indices), 0)
+        self.assertEqual(enabled.stats["distance_fade_black_piece_count"], 1)
+        self.assertEqual(enabled.stats["distance_fade_samples"], 1)
+        self.assertEqual(enabled.stats["transparent_replay_faces"], [])
+
+    def test_distance_fade_all_white_shortcut_bypasses_shadermp(self):
+        tables = _tables(shader_changes={(1, 7): 99})
+        surface = _texture(
+            (7,), 1, 1, shade_mode="gradient", shade_value=1,
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        result = IndexedRasterizer.render(
+            1, 1, [_triangle_piece(surface)], tables,
+            # Radial source distance 800 is exactly fade_start, so b=0.
+            distance_fade_profile=IndexedDistanceFadeProfile(
+                enabled=True, source_distance_scale=200.0))
+
+        self.assertEqual(_at(result.indices), 7)
+        self.assertEqual(result.stats["distance_fade_bypass_piece_count"], 1)
+        self.assertEqual(result.stats["distance_fade_samples"], 0)
+        self.assertTrue(result.stats["distance_fade_effective"])
+
+    def test_distance_fade_shortcuts_are_classified_per_source_face(self):
+        surface = _texture(
+            (7,), 1, 1, shade_mode="none", tracy_mode="clear",
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        near = _triangle_piece(
+            surface, face_id="split-face", polygon_id=20,
+            screen=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+            camera=((0.0, 0.0, 0.0),) * 3,
+            sort_depth=1.0,
+        )
+        far = _triangle_piece(
+            surface, face_id="split-face", polygon_id=20,
+            screen=((1.0, 0.0), (2.0, 0.0), (1.0, 1.0)),
+            camera=((0.0, 0.0, -1396.0),) * 3,
+            sort_depth=2.0,
+        )
+        result = IndexedRasterizer.render(
+            2, 1, [near, far], _tables(),
+            distance_fade_profile=IndexedDistanceFadeProfile(enabled=True))
+
+        # Retail classifies the complete source polygon as mixed. Neither BSP
+        # fragment may independently become an unshaded or opaque-black face.
+        self.assertEqual(result.stats["distance_fade_bypass_piece_count"], 0)
+        self.assertEqual(result.stats["distance_fade_black_piece_count"], 0)
+        self.assertEqual(result.stats["distance_fade_dynamic_piece_count"], 2)
+        self.assertEqual(result.stats["distance_fade_effective_piece_count"], 2)
+        self.assertEqual(
+            result.stats["distance_fade_whole_polygon_scope"].split(";")[0],
+            "all BSP fragments sharing one source_face_id are classified "
+            "together",
+        )
+
+    def test_supplied_clipped_vertex_brightness_is_not_recomputed_at_bsp(self):
+        surface = _texture(
+            (7,), 1, 1, shade_mode="gradient", shade_value=1,
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        # Camera vertices alone would classify this as all-black. The supplied
+        # channel represents brightness evaluated before a viewer-only BSP
+        # intersection and must remain the authority.
+        piece = IndexedPiece(
+            "bsp-face", 30,
+            ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+            ((0.0, 0.0),) * 3,
+            ((0.0, 0.0, -1396.0),) * 3,
+            surface,
+            vertex_brightness=(0.0, 0.5, 1.0),
+            vertex_shade_fixed=(384.0, 32768.0, 65152.0),
+            vertex_distance_fade_signature=(1400.0, 600.0, 1.0),
+        )
+        profile = IndexedDistanceFadeProfile(enabled=True)
+        accelerated = IndexedRasterizer.render(
+            1, 1, [piece], _tables(), distance_fade_profile=profile)
+        with patch.object(indexed_renderer, "_np", None):
+            fallback = IndexedRasterizer.render(
+                1, 1, [piece], _tables(), distance_fade_profile=profile)
+
+        self.assertEqual(
+            accelerated.stats["distance_fade_dynamic_piece_count"], 1)
+        self.assertEqual(accelerated.stats["distance_fade_black_piece_count"], 0)
+        self.assertEqual(
+            accelerated.stats["distance_fade_vertex_channel_piece_count"], 1)
+        self.assertEqual(
+            accelerated.stats["index_buffer_sha256"],
+            fallback.stats["index_buffer_sha256"])
+
+        with self.assertRaisesRegex(ValueError, "do not match"):
+            IndexedRasterizer.render(
+                1, 1, [piece], _tables(),
+                distance_fade_profile=IndexedDistanceFadeProfile(
+                    enabled=True, visibility_limit=2100.0,
+                    fade_length=900.0))
+
+        with self.assertRaisesRegex(ValueError, "source range"):
+            IndexedPiece(
+                "bad-fixed", 31,
+                ((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+                ((0.0, 0.0),) * 3,
+                ((0.0, 0.0, 0.0),) * 3,
+                surface,
+                vertex_brightness=(0.0, 0.5, 1.0),
+                vertex_shade_fixed=(-1.0, 32768.0, 65153.0),
+                vertex_distance_fade_signature=(1400.0, 600.0, 1.0),
+            )
+
+    def test_distance_fade_never_applies_to_flat_tracy(self):
+        surface = _texture(
+            (7,), 1, 1, tracy_mode="flat",
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=False,
+        )
+        result = IndexedRasterizer.render(
+            1, 1, [_triangle_piece(surface)], _tables(),
+            distance_fade_profile=IndexedDistanceFadeProfile(
+                enabled=True, source_distance_scale=350.0))
+
+        self.assertEqual(result.stats["distance_fade_eligible_piece_count"], 0)
+        self.assertFalse(result.stats["distance_fade_effective"])
+        self.assertEqual(result.stats["flat_tracy_samples"], 1)
+        with self.assertRaisesRegex(ValueError, "flat TRACY"):
+            _texture(
+                (7,), 1, 1, tracy_mode="flat",
+                authored_shade_value=0,
+                authored_depth_fade_flag=True,
+                distance_fade_eligible=True,
+            )
+        for invalid_shade_mode in ("flat", "line"):
+            with self.subTest(shade_mode=invalid_shade_mode):
+                with self.assertRaisesRegex(ValueError, "gradient shade"):
+                    _texture(
+                        (7,), 1, 1, shade_mode=invalid_shade_mode,
+                        authored_shade_value=3,
+                        authored_depth_fade_flag=True,
+                        distance_fade_eligible=True,
+                    )
 
     def test_coverage_keeps_mapped_index_zero_opaque_and_background_clear(self):
         tables = _tables(shader_changes={(2, 7): 0})

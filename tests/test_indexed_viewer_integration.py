@@ -15,6 +15,7 @@ from assembly_viewer import (
     ViewFace,
     ViewMaterial,
     _cardinal_sin_cos,
+    _retail_area_distance_fade_vertex,
     _retail_source_face_front_facing,
 )
 from indexed_renderer import (
@@ -99,6 +100,13 @@ class IndexedViewerIntegrationTests(unittest.TestCase):
         self.assertIsNone(
             live_info["flat_tracy_forced_destination_index"])
         self.assertTrue(live_info["canonical_retail_configuration"])
+        self.assertTrue(live_info["canonical_retail_destination_policy"])
+        self.assertIn(
+            "distance profile",
+            live_info["canonical_retail_configuration_scope"])
+        self.assertEqual(
+            live_info["distance_fade_profile_state"],
+            "disabled_closeup_compatibility")
         self.assertEqual(
             live_info["last_render_stats"]["initial_framebuffer_index"], 0)
 
@@ -116,6 +124,7 @@ class IndexedViewerIntegrationTests(unittest.TestCase):
         self.assertEqual(
             forced_info["flat_tracy_forced_destination_rgb"], [13, 13, 13])
         self.assertFalse(forced_info["canonical_retail_configuration"])
+        self.assertFalse(forced_info["canonical_retail_destination_policy"])
         self.assertEqual(
             forced_info["last_render_stats"][
                 "flat_tracy_forced_destination_index"], 13)
@@ -149,6 +158,89 @@ class IndexedViewerIntegrationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(TypeError):
                 viewport.set_flat_tracy_forced_destination_index(value)
 
+    def test_distance_fade_toggle_is_opt_in_and_snapshot_restores_it(self):
+        viewport = _viewport()
+        self.assertFalse(viewport.retail_area_distance_fade_enabled)
+        self.assertFalse(
+            viewport.indexed_renderer_info[
+                "requested_distance_fade_enabled"])
+
+        viewport.set_retail_area_distance_fade_enabled(True)
+        info = viewport.indexed_renderer_info
+        self.assertTrue(info["requested_distance_fade_enabled"])
+        self.assertFalse(info["effective_distance_fade_enabled"])
+        self.assertEqual(
+            info["distance_fade_profile_id"],
+            "retail_gameplay_near_1400_600")
+        self.assertEqual(
+            info["distance_fade_profile_state"],
+            "retail_gameplay_near_1400_600")
+        self.assertEqual(info["distance_fade_start"], 800.0)
+        self.assertEqual(info["distance_fade_length"], 600.0)
+
+        viewport.begin_snapshot_mode(None)
+        viewport.set_distance_fade_enabled(False)
+        self.assertFalse(viewport.distance_fade_enabled)
+        viewport.end_snapshot_mode()
+        self.assertTrue(viewport.distance_fade_enabled)
+        self.assertEqual(viewport.indexed_renderer_info["last_render_stats"], {})
+
+        with self.assertRaises(TypeError):
+            viewport.set_distance_fade_enabled(1)
+
+    def test_viewport_passes_retail_distance_profile_to_indexed_renderer(self):
+        viewport = _viewport()
+        surface = IndexedSurface(
+            "SHADED.ILBM", "texture", bytes((9,)), 1, 1,
+            tuple(False for _ in range(256)), None,
+            "gradient", 1, "none", "linear",
+            authored_shade_value=0,
+            authored_depth_fade_flag=True,
+            distance_fade_eligible=True,
+        )
+        viewport._indexed_adapter = SimpleNamespace(
+            source_info={}, tables=_tables(),
+            resolve_surface=lambda *_args: surface)
+        viewport.set_distance_fade_enabled(True)
+
+        image = viewport.render_snapshot(QSize(32, 32), None)
+        info = viewport.indexed_renderer_info
+
+        self.assertFalse(image.isNull())
+        self.assertTrue(info["requested_distance_fade_enabled"])
+        self.assertTrue(info["effective_distance_fade_enabled"])
+        stats = info["last_render_stats"]
+        self.assertTrue(stats["distance_fade_requested"])
+        self.assertTrue(stats["distance_fade_effective"])
+        self.assertEqual(
+            stats["distance_fade_profile"]["name"],
+            "retail_gameplay_near_1400_600")
+        self.assertEqual(
+            stats["distance_fade_profile"]["source_distance_scale"],
+            1.0 / viewport._scale)
+        self.assertGreater(
+            stats["distance_fade_vertex_channel_piece_count"], 0)
+
+    def test_retail_distance_fade_uses_radial_source_units_not_zoom(self):
+        expected = (
+            (799.0, 0.0),
+            (800.0, 0.0),
+            (1100.0, 0.5),
+            (1400.0, 1.0),
+        )
+        for distance, expected_brightness in expected:
+            with self.subTest(distance=distance):
+                brightness, _fixed = _retail_area_distance_fade_vertex(
+                    (0.0, 0.0, 4.0 - distance), 0, 1.0)
+                self.assertAlmostEqual(
+                    brightness, expected_brightness, places=12)
+
+                # The same source distance under a different auto-fit scale
+                # must retain the same brightness. Lens zoom and pan are not
+                # inputs to this helper at all.
+                scaled, _scaled_fixed = _retail_area_distance_fade_vertex(
+                    (0.0, 0.0, 4.0 - distance * 0.25), 0, 0.25)
+                self.assertAlmostEqual(scaled, brightness, places=12)
     def test_runtime_material_failure_is_reported_as_effective_fallback(self):
         viewport = _viewport()
 
@@ -406,6 +498,35 @@ class IndexedViewerIntegrationTests(unittest.TestCase):
 
         self.assertEqual(
             viewport.indexed_renderer_info["last_render_stats"], {})
+
+    def test_animation_frame_changes_invalidate_prior_render_metadata(self):
+        viewport = AssetViewport()
+        viewport._materials = [ViewMaterial(
+            "ANIM.ANM",
+            anim_frames=[(1, 0, 0), (1, 0, 0)],
+            anim_type=0,
+        )]
+        viewport._reset_animation_states()
+        viewport._last_effective_renderer = "retail_indexed_reconstructed"
+        viewport._last_indexed_stats = {
+            "index_buffer_sha256": "frame-one",
+        }
+
+        viewport.step_animation()
+
+        self.assertEqual(viewport._anim_states[0], (1, 1))
+        self.assertEqual(viewport.indexed_renderer_info["last_render_stats"], {})
+        self.assertEqual(
+            viewport.indexed_renderer_info["effective_mode"], "not_rendered")
+
+        viewport._anim_states[0] = (1, 1)
+        viewport._last_effective_renderer = "retail_indexed_reconstructed"
+        viewport._last_indexed_stats = {
+            "index_buffer_sha256": "frame-two",
+        }
+        viewport.stop_animation()
+        self.assertEqual(viewport._anim_states[0], (0, 1))
+        self.assertEqual(viewport.indexed_renderer_info["last_render_stats"], {})
 
     def test_leaving_snapshot_mode_clears_temporary_renderer_metadata(self):
         viewport = _viewport()

@@ -9,11 +9,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
-    QApplication, QHeaderView, QMessageBox, QTreeWidgetItem,
+    QApplication, QCheckBox, QHeaderView, QMessageBox, QTreeWidgetItem,
 )
 
 import assembly_window as assembly_window_module
-from assembly_viewer import VIEW_MODES
+from assembly_viewer import VIEW_MODES, ViewMaterial
 from assembly_window import AssemblyWindow
 from vp_manager import VPManager, parse_visproto_text
 
@@ -99,6 +99,9 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertNotIn("solid", visible_modes)
             self.assertIn("solid", VIEW_MODES)
             self.assertEqual(window.step_button.text(), ">>")
+            self.assertIsInstance(window.play_button, QCheckBox)
+            self.assertEqual(window.play_button.text(), "Enable animations")
+            self.assertFalse(window.play_button.isChecked())
             self.assertTrue(window.auto_align_check.isChecked())
             self.assertEqual(window._resources_tabs.tabText(0), "Bas Manager")
             self.assertFalse(hasattr(window, "global_edit_button"))
@@ -250,6 +253,75 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertFalse(index_spin.isEnabled())
             self.assertEqual(index_spin.value(), 13)
             self.assertEqual(window._snapshot_renderer_filename_suffix(), "")
+        finally:
+            window.close()
+
+    def test_retail_distance_fade_control_is_explicit_and_renderer_gated(self):
+        window = AssemblyWindow()
+        try:
+            fade = window.snapshot_distance_fade_check
+            self.assertEqual(
+                fade.text(), "AREA distance fade (1400/600)")
+            self.assertFalse(fade.isChecked())
+            self.assertFalse(fade.isEnabled())
+            self.assertFalse(window.viewport.distance_fade_enabled)
+
+            indexed = window.snapshot_renderer_combo.findData(
+                "textured_indexed")
+            window.snapshot_renderer_combo.setCurrentIndex(indexed)
+            self.app.processEvents()
+            self.assertTrue(fade.isEnabled())
+            fade.setChecked(True)
+            self.app.processEvents()
+            self.assertTrue(window.viewport.distance_fade_enabled)
+            self.assertEqual(window._snapshot_renderer_filename_suffix(),
+                             "_DFADE")
+
+            forced = window.snapshot_tracy_destination_combo.findData(
+                "forced_diagnostic")
+            window.snapshot_tracy_destination_combo.setCurrentIndex(forced)
+            window.snapshot_tracy_destination_index_spin.setValue(13)
+            self.app.processEvents()
+            self.assertEqual(
+                window._snapshot_renderer_filename_suffix(),
+                "_DFADE_TRACY_FORCE_013_DIAGNOSTIC")
+
+            standard = window.snapshot_renderer_combo.findData("textured")
+            window.snapshot_renderer_combo.setCurrentIndex(standard)
+            self.app.processEvents()
+            self.assertFalse(fade.isEnabled())
+            self.assertTrue(fade.isChecked())
+            self.assertTrue(window.viewport.distance_fade_enabled)
+            self.assertEqual(window._snapshot_renderer_filename_suffix(), "")
+        finally:
+            window.close()
+
+    def test_animation_checkbox_preserves_preference_without_resetting(self):
+        window = AssemblyWindow()
+        try:
+            control = window.play_button
+            self.assertFalse(control.isChecked())
+            self.assertFalse(control.isEnabled())
+
+            # A disabled/no-animation selection must not erase the preference.
+            control.setChecked(True)
+            window._sync_animation_controls()
+            self.assertTrue(control.isChecked())
+            self.assertFalse(window.viewport._anim_playing)
+
+            window.viewport._materials = [ViewMaterial(
+                "TEST.ANM", anim_frames=[(10, 0, 0), (10, 0, 0)])]
+            window.viewport._anim_states = {0: (1, 1)}
+            window.viewport._anim_left_ms = {0: 5.0}
+            window._sync_animation_controls()
+            self.assertTrue(control.isEnabled())
+            self.assertTrue(window.viewport._anim_playing)
+
+            control.setChecked(False)
+            self.app.processEvents()
+            self.assertFalse(window.viewport._anim_playing)
+            self.assertEqual(window.viewport._anim_states[0], (1, 1))
+            self.assertEqual(window.viewport._anim_left_ms[0], 5.0)
         finally:
             window.close()
 

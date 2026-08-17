@@ -13,6 +13,33 @@ release line.
 - A public 4K comparison sheet for the Hauptstation, Zeppelin, and Mnosjetz,
   showing the normal OpenUAStudio RGB preview beside the source-traced
   retail-indexed reconstruction with matched cameras and animation states.
+- An opt-in Snapshot Studio **Retail AREA distance fade (1400/600)** control,
+  off by default, which applies the source-traced radial per-vertex fade only
+  to mapped gradient-shaded faces carrying `AREA_FLAG_DPTHFADE`.
+- An explicit toolbar **Enable animations** checkbox for continuous VANM and
+  effect-frame playback, with the existing frame-step and reset controls kept
+  available while playback is paused.
+- Per-image and per-run distance-fade provenance, including requested/effective
+  state, runtime visibility limit, fade start/length, distance space, and
+  formula for exact indexed output. Enabled faded PNGs are committed only after
+  the raster statistics prove that complete profile, and resume metadata uses
+  strict native JSON numeric types.
+
+### Changed
+
+- The distance-fade selector uses the normal retail gameplay profile (1400-unit
+  visibility, 600-unit fade, start 800). Documentation now distinguishes the
+  asset's eligibility flag from runtime configuration, including the original
+  BSA class-initialization 4096/600 default and potentially different
+  mission-brief values. The viewer applies 1400/600 at its auto-fit camera
+  distance; it does not claim a recovered mission/world placement.
+- Complete-model batch export freezes the fade selection at batch start but
+  remains animation-deterministic: its hidden viewport is paused and every
+  source is reset to the initial frame.
+- Batch filenames remain stable across fade choices. **Skip existing** now
+  requires the prior renderer/destination profile and, when enabled, the full
+  fade profile ID, limits, distance space, and formula to match; legacy indexed
+  provenance with no fade field is interpreted as fade disabled.
 
 ## [2.0.0] - 2026-08-15
 

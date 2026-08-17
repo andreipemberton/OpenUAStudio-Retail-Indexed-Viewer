@@ -67,7 +67,12 @@ from geometry_editor import (
     mat_apply,
 )
 from indexed_family_adapter import IndexedFamilyAdapter
-from indexed_renderer import IndexedPiece, IndexedRasterizer
+from indexed_renderer import (
+    INDEXED_DISTANCE_FADE_FORMULA,
+    IndexedDistanceFadeProfile,
+    IndexedPiece,
+    IndexedRasterizer,
+)
 
 MATERIAL_COLORS = [
     QColor(96, 170, 255), QColor(255, 170, 80), QColor(120, 220, 120),
@@ -87,6 +92,16 @@ FLAT_TRACY_DESTINATION_MODES = (
     "live_framebuffer",
     "forced_diagnostic",
 )
+RETAIL_AREA_DISTANCE_FADE_PROFILE_ID = "retail_gameplay_near_1400_600"
+RETAIL_AREA_DISTANCE_FADE_VISIBILITY_LIMIT = 1400.0
+RETAIL_AREA_DISTANCE_FADE_LENGTH = 600.0
+RETAIL_AREA_DISTANCE_FADE_START = (
+    RETAIL_AREA_DISTANCE_FADE_VISIBILITY_LIMIT
+    - RETAIL_AREA_DISTANCE_FADE_LENGTH)
+RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE = (
+    "radial source-model distance from the eye in UA model units; viewer "
+    "camera distance is multiplied by 1/camera_scale")
+RETAIL_AREA_DISTANCE_FADE_FORMULA = INDEXED_DISTANCE_FADE_FORMULA
 INDEXED_EFFECTIVE_RENDERERS = (
     "retail_indexed_reconstructed",
     "retail_indexed_forced_tracy_diagnostic",
@@ -183,6 +198,32 @@ def _retail_source_face_front_facing(
     )
     visibility = sum(normal[axis] * points[0][axis] for axis in range(3))
     return visibility >= 0.0
+
+
+def _retail_area_distance_fade_vertex(
+        camera_vertex: tuple[float, float, float], raw_shade: int,
+        camera_scale: float) -> tuple[float, float]:
+    """Return retail AREA brightness and fixed value after 3-D clipping."""
+
+    if not math.isfinite(camera_scale) or camera_scale <= 0.0:
+        raise ValueError(
+            "retail AREA distance fade requires a finite positive camera "
+            "model scale")
+    shade = operator.index(raw_shade)
+    if not 0 <= shade <= 255:
+        raise ValueError("retail AREA authored shade must be between 0 and 255")
+    x, y, z = camera_vertex
+    distance_ua = math.sqrt(
+        x * x + y * y + (_PICK_CAMERA_DISTANCE - z) ** 2
+    ) / camera_scale
+    fade = max(
+        0.0,
+        (distance_ua - RETAIL_AREA_DISTANCE_FADE_START)
+        / RETAIL_AREA_DISTANCE_FADE_LENGTH,
+    )
+    brightness = min(1.0, max(0.0, shade / 256.0 + fade))
+    fixed = float(int(round(brightness * 64768.0)) + 0x180)
+    return brightness, fixed
 
 
 def _cardinal_sin_cos(angle_degrees: float) -> tuple[float, float]:
@@ -539,6 +580,10 @@ class AssetViewport(QWidget):
         # never an alternate claim about canonical retail rendering.
         self._flat_tracy_destination_mode = "live_framebuffer"
         self._flat_tracy_forced_destination_index = 0
+        # AREA stores only the authored DepthFade flag. Retail gameplay
+        # supplied 1400/600 at runtime; this explicit near profile is opt-in so
+        # v2.0 close-up reference hashes remain unchanged by default.
+        self._retail_area_distance_fade_enabled = False
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None
@@ -2746,6 +2791,36 @@ class AssetViewport(QWidget):
                 f"{index}.")
         self.update()
 
+    def set_retail_area_distance_fade_enabled(self, enabled: bool) -> None:
+        """Toggle the explicit retail-gameplay-near AREA fade profile."""
+
+        if not isinstance(enabled, bool):
+            raise TypeError("retail AREA distance fade state must be a boolean")
+        if enabled == self._retail_area_distance_fade_enabled:
+            return
+        self._retail_area_distance_fade_enabled = enabled
+        self._invalidate_last_render_metadata()
+        if enabled:
+            self.statusMessage.emit(
+                "Retail AREA distance fade enabled: visibility 1400, fade "
+                "length 600 (starts at 800 UA model units).")
+        else:
+            self.statusMessage.emit("Retail AREA distance fade disabled.")
+        self.update()
+
+    def set_distance_fade_enabled(self, enabled: bool) -> None:
+        """Batch/export-friendly alias for the retail AREA fade toggle."""
+
+        self.set_retail_area_distance_fade_enabled(enabled)
+
+    @property
+    def retail_area_distance_fade_enabled(self) -> bool:
+        return self._retail_area_distance_fade_enabled
+
+    @property
+    def distance_fade_enabled(self) -> bool:
+        return self._retail_area_distance_fade_enabled
+
     @property
     def flat_tracy_destination_mode(self) -> str:
         return self._flat_tracy_destination_mode
@@ -2829,6 +2904,13 @@ class AssetViewport(QWidget):
         selected_rgb = self.flat_tracy_destination_display_rgb
         raw_rgb = self.flat_tracy_destination_raw_rgb
         forced_index = self.flat_tracy_forced_destination_index
+        requested_distance_fade = bool(
+            requested == "textured_indexed"
+            and self._retail_area_distance_fade_enabled)
+        effective_distance_fade = bool(
+            self._last_effective_renderer in INDEXED_EFFECTIVE_RENDERERS
+            and self._last_indexed_stats.get(
+                "distance_fade_effective", False))
         info = {
             "available": bool(resources_available and not self._indexed_runtime_error),
             "resources_available": resources_available,
@@ -2861,9 +2943,41 @@ class AssetViewport(QWidget):
                 list(raw_rgb) if raw_rgb is not None else None),
             "canonical_retail_configuration": (
                 self._flat_tracy_destination_mode == "live_framebuffer"),
+            "canonical_retail_configuration_scope": (
+                "deprecated alias for canonical_retail_destination_policy; "
+                "certifies only indexed clear index 0 and live flat/LUM-"
+                "TRACY destination reads, not the runtime distance profile"
+            ),
+            "canonical_retail_destination_policy": (
+                self._flat_tracy_destination_mode == "live_framebuffer"),
             "source_faithful_frame_clear": True,
             "source_faithful_flat_destination_reads": (
                 self._flat_tracy_destination_mode == "live_framebuffer"),
+            "requested_distance_fade_enabled": requested_distance_fade,
+            "effective_distance_fade_enabled": effective_distance_fade,
+            "effective_distance_fade_scope": (
+                "eligible render paths processed by the selected profile; "
+                "does not assert that the final image differs from a matched "
+                "fade-disabled render"
+            ),
+            "distance_fade_profile_state": (
+                RETAIL_AREA_DISTANCE_FADE_PROFILE_ID
+                if requested_distance_fade
+                else (
+                    "disabled_closeup_compatibility"
+                    if requested == "textured_indexed"
+                    else "inactive_for_requested_renderer"
+                )
+            ),
+            "distance_fade_profile_id": (
+                RETAIL_AREA_DISTANCE_FADE_PROFILE_ID),
+            "distance_fade_visibility_limit": (
+                RETAIL_AREA_DISTANCE_FADE_VISIBILITY_LIMIT),
+            "distance_fade_start": RETAIL_AREA_DISTANCE_FADE_START,
+            "distance_fade_length": RETAIL_AREA_DISTANCE_FADE_LENGTH,
+            "distance_fade_distance_space": (
+                RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE),
+            "distance_fade_formula": RETAIL_AREA_DISTANCE_FADE_FORMULA,
             "last_render_stats": dict(self._last_indexed_stats),
         }
         if self._indexed_adapter is not None:
@@ -2935,6 +3049,8 @@ class AssetViewport(QWidget):
                     self._flat_tracy_destination_mode),
                 "flat_tracy_forced_destination_index": (
                     self._flat_tracy_forced_destination_index),
+                "retail_area_distance_fade_enabled": (
+                    self._retail_area_distance_fade_enabled),
             }
             self._snapshot_current_camera = camera.copy()
             self._snapshot_current_camera["pan"] = QPointF(camera["pan"])
@@ -2973,6 +3089,8 @@ class AssetViewport(QWidget):
                 "flat_tracy_destination_mode"]
             self._flat_tracy_forced_destination_index = state[
                 "flat_tracy_forced_destination_index"]
+            self._retail_area_distance_fade_enabled = state[
+                "retail_area_distance_fade_enabled"]
         # The snapshot's renderer/hash metadata describes the temporary
         # camera and mode, not the restored workspace.  Leave no stale exact
         # claim visible while the normal viewport awaits its next repaint.
@@ -3168,11 +3286,13 @@ class AssetViewport(QWidget):
         self._anim_playing = False
         self._anim_timer.stop()
         self._reset_animation_states()
+        self._invalidate_last_render_metadata()
 
     def set_animation_speed(self, speed: float) -> None:
         self._anim_speed = max(0.05, min(8.0, speed))
 
     def step_animation(self) -> None:
+        changed = False
         for mat_id, mat in enumerate(self._materials):
             if not mat.anim_frames:
                 continue
@@ -3180,11 +3300,15 @@ class AssetViewport(QWidget):
             frame, direction = self._next_frame(mat, frame, direction)
             self._anim_states[mat_id] = (frame, direction)
             self._anim_left_ms[mat_id] = 0.0
+            changed = True
+        if changed:
+            self._invalidate_last_render_metadata()
         self.update()
         self.animationFrameChanged.emit(self.current_frame_text())
 
     def reset_animation(self) -> None:
         self._reset_animation_states()
+        self._invalidate_last_render_metadata()
         self.update()
         self.animationFrameChanged.emit(self.current_frame_text())
 
@@ -3208,6 +3332,7 @@ class AssetViewport(QWidget):
                     material, 0, 1, elapsed))
             self._anim_states[material_id] = (frame, direction)
             self._anim_left_ms[material_id] = remaining
+        self._invalidate_last_render_metadata()
         self.update()
         self.animationFrameChanged.emit(self.current_frame_text())
 
@@ -3396,6 +3521,7 @@ class AssetViewport(QWidget):
             self._anim_states[mat_id] = (frame, direction)
             self._anim_left_ms[mat_id] = left
         if changed:
+            self._invalidate_last_render_metadata()
             self.update()
             text = self.current_frame_text()
             self.statusMessage.emit(text)
@@ -3481,6 +3607,21 @@ class AssetViewport(QWidget):
             return QImage()
         self._validate_indexed_pixel_budget(width, height)
 
+        distance_fade_profile = None
+        if self._retail_area_distance_fade_enabled:
+            camera_scale = float(camera["scale"])
+            if not math.isfinite(camera_scale) or camera_scale <= 0.0:
+                raise RuntimeError(
+                    "retail AREA distance fade requires a finite positive "
+                    "camera model scale")
+            distance_fade_profile = IndexedDistanceFadeProfile(
+                enabled=True,
+                visibility_limit=(
+                    RETAIL_AREA_DISTANCE_FADE_VISIBILITY_LIMIT),
+                fade_length=RETAIL_AREA_DISTANCE_FADE_LENGTH,
+                source_distance_scale=1.0 / camera_scale,
+            )
+
         origin_x = float(target.left())
         origin_y = float(target.top())
         indexed_pieces: list[IndexedPiece] = []
@@ -3522,13 +3663,31 @@ class AssetViewport(QWidget):
                 surface=surface,
                 source_order=int(payload.source_order),
                 sort_depth=float(payload.sort_depth),
+                vertex_brightness=tuple(
+                    float(attributes[2]) for attributes in piece.attributes
+                ) if piece.attributes and all(
+                    len(attributes) >= 4
+                    for attributes in piece.attributes) else (),
+                vertex_shade_fixed=tuple(
+                    float(attributes[3]) for attributes in piece.attributes
+                ) if piece.attributes and all(
+                    len(attributes) >= 4
+                    for attributes in piece.attributes) else (),
+                vertex_distance_fade_signature=(
+                    distance_fade_profile.channel_signature
+                    if distance_fade_profile is not None
+                    and piece.attributes and all(
+                        len(attributes) >= 4
+                        for attributes in piece.attributes)
+                    else ()
+                ),
             ))
-
         result = IndexedRasterizer.render(
             width, height, indexed_pieces, adapter.tables,
             background_index=0,
             flat_tracy_destination_override=(
-                self.flat_tracy_forced_destination_index))
+                self.flat_tracy_forced_destination_index),
+            distance_fade_profile=distance_fade_profile)
         rgba = result.to_rgba(
             adapter.tables, transparent_background=True)
         image = QImage(
@@ -3725,6 +3884,15 @@ class AssetViewport(QWidget):
             # paint exact back-to-front pieces without a hardware depth buffer.
             triangles: list[CameraPolygon] = []
             source_order = 0
+            distance_fade_camera_scale = None
+            if (mode == "textured_indexed"
+                    and self._retail_area_distance_fade_enabled):
+                distance_fade_camera_scale = float(camera["scale"])
+                if (not math.isfinite(distance_fade_camera_scale)
+                        or distance_fade_camera_scale <= 0.0):
+                    raise RuntimeError(
+                        "retail AREA distance fade requires a finite positive "
+                        "camera model scale")
             for face_order, face in enumerate(self._faces):
                 if (not clean and not face.mapped
                         and not self._mapping_diagnostics):
@@ -3768,6 +3936,20 @@ class AssetViewport(QWidget):
                     ))
                     if clipped is None:
                         continue
+                    clipped_attributes = clipped.attributes
+                    if distance_fade_camera_scale is not None:
+                        enriched_attributes = []
+                        for uv, vertex in zip(
+                                clipped.attributes, clipped.vertices):
+                            brightness, fixed = (
+                                _retail_area_distance_fade_vertex(
+                                    vertex, face.shade,
+                                    distance_fade_camera_scale))
+                            enriched_attributes.append((
+                                float(uv[0]), float(uv[1]),
+                                brightness, fixed,
+                            ))
+                        clipped_attributes = tuple(enriched_attributes)
                     tri_screen = [
                         self._project(point, target, camera)
                         for point in clipped.vertices
@@ -3790,7 +3972,7 @@ class AssetViewport(QWidget):
                         continue
                     triangles.append(CameraPolygon(
                         clipped.vertices,
-                        clipped.attributes,
+                        clipped_attributes,
                         _RenderPayload(
                             face, image, front_facing, uv_mapping_valid,
                             face_order,
@@ -3848,7 +4030,10 @@ class AssetViewport(QWidget):
                 payload = piece.payload
                 draw_piece(
                     payload.face, piece.vertices,
-                    piece.attributes, payload.image,
+                    tuple(
+                        (attributes[0], attributes[1])
+                        for attributes in piece.attributes),
+                    payload.image,
                     payload.front_facing,
                     draw_model=(not indexed_active
                                 or (not clean

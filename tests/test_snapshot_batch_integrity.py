@@ -15,6 +15,11 @@ from PySide6.QtCore import QSize
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
+from assembly_viewer import (
+    RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE,
+    RETAIL_AREA_DISTANCE_FADE_FORMULA,
+)
+
 from snapshot_studio.batch_export import (
     BatchManifestRow,
     SnapshotSource,
@@ -39,7 +44,15 @@ def _row(
         effective_forced_index: int | None = None,
         effective_initial_index: int | None = None,
         effective_initial_rgb: str = "",
-        effective_forced_rgb: str = "") -> BatchManifestRow:
+        effective_forced_rgb: str = "",
+        requested_distance_fade_enabled: bool | None = False,
+        effective_distance_fade_enabled: bool | None = None,
+        distance_fade_profile_id: str = "",
+        distance_fade_visibility_limit: float | None = None,
+        distance_fade_start: float | None = None,
+        distance_fade_length: float | None = None,
+        distance_fade_distance_space: str = "",
+        distance_fade_formula: str = "") -> BatchManifestRow:
     return BatchManifestRow(
         "VP", 1, 1, "VP_TEST", 1, "Skeleton/VP_TEST.sklt",
         "root", "Skeleton/VP_TEST.sklt", "Front", relative_file,
@@ -50,6 +63,12 @@ def _row(
         effective_destination_mode, effective_destination_class,
         effective_forced_index, effective_initial_index,
         effective_initial_rgb, effective_forced_rgb,
+        requested_distance_fade_enabled,
+        effective_distance_fade_enabled,
+        distance_fade_profile_id,
+        distance_fade_visibility_limit, distance_fade_start,
+        distance_fade_length, distance_fade_distance_space,
+        distance_fade_formula,
     )
 
 
@@ -82,19 +101,22 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_batch_freezes_and_propagates_destination_controls(self):
+    def test_batch_freezes_and_propagates_indexed_controls(self):
         panel = SimpleNamespace(
             window=SimpleNamespace(viewport=SimpleNamespace(
                 flat_tracy_destination_mode="forced_diagnostic",
                 flat_tracy_forced_destination_index=31,
+                distance_fade_enabled=True,
             )),
             _renderer_mode="textured_indexed",
         )
 
         VPSnapshotBatchPanel._capture_flat_tracy_destination_settings(panel)
+        VPSnapshotBatchPanel._capture_distance_fade_setting(panel)
         self.assertEqual(
             panel._flat_tracy_destination_mode, "forced_diagnostic")
         self.assertEqual(panel._flat_tracy_forced_destination_index, 31)
+        self.assertTrue(panel._distance_fade_enabled)
 
         viewport = Mock()
         with patch(
@@ -109,6 +131,7 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             31)
         viewport.set_flat_tracy_destination_mode.assert_called_once_with(
             "forced_diagnostic")
+        viewport.set_distance_fade_enabled.assert_called_once_with(True)
         viewport.begin_snapshot_mode.assert_called_once_with(None)
         viewport.play_animation.assert_called_once_with(False)
         viewport.set_snapshot_guides_visible.assert_called_once_with(False)
@@ -118,13 +141,16 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             viewport=SimpleNamespace(
                 flat_tracy_destination_mode="unknown",
                 flat_tracy_forced_destination_index=999,
+                distance_fade_enabled="yes",
             )))
 
         VPSnapshotBatchPanel._capture_flat_tracy_destination_settings(panel)
+        VPSnapshotBatchPanel._capture_distance_fade_setting(panel)
 
         self.assertEqual(
             panel._flat_tracy_destination_mode, "live_framebuffer")
         self.assertEqual(panel._flat_tracy_forced_destination_index, 0)
+        self.assertFalse(panel._distance_fade_enabled)
 
     def test_skip_existing_rejects_unverified_and_mismatched_profiles(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -225,6 +251,126 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
 
             self.assertEqual(reason, "")
 
+    def test_skip_profile_treats_missing_legacy_fade_as_false(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "front.png").write_bytes(b"png")
+            (root / "run_info.json").write_text(json.dumps({
+                "renderer_mode": "textured_indexed",
+                "indexed_flat_tracy_destination_mode_requested": (
+                    "live_framebuffer"),
+                "indexed_flat_tracy_forced_destination_index_requested": None,
+            }), encoding="utf-8")
+            panel = SimpleNamespace(
+                _root=root,
+                _renderer_mode="textured_indexed",
+                _flat_tracy_destination_mode="live_framebuffer",
+                _flat_tracy_forced_destination_index=0,
+                _distance_fade_enabled=False,
+                skip_existing_check=SimpleNamespace(isChecked=lambda: True),
+            )
+
+            self.assertEqual(
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel), "")
+
+            panel._distance_fade_enabled = True
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("distance fade off", reason)
+            self.assertIn("distance fade on", reason)
+
+    def test_skip_profile_rejects_mismatched_or_invalid_fade_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "front.png").write_bytes(b"png")
+            panel = SimpleNamespace(
+                _root=root,
+                _renderer_mode="textured_indexed",
+                _flat_tracy_destination_mode="live_framebuffer",
+                _flat_tracy_forced_destination_index=0,
+                _distance_fade_enabled=True,
+                skip_existing_check=SimpleNamespace(isChecked=lambda: True),
+            )
+            base_info = {
+                "renderer_mode": "textured_indexed",
+                "indexed_flat_tracy_destination_mode_requested": (
+                    "live_framebuffer"),
+                "indexed_flat_tracy_forced_destination_index_requested": None,
+            }
+
+            (root / "run_info.json").write_text(json.dumps({
+                **base_info,
+                "indexed_distance_fade_enabled_requested": False,
+            }), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("distance fade off", reason)
+            self.assertIn("distance fade on", reason)
+
+            (root / "run_info.json").write_text(json.dumps({
+                **base_info,
+                "indexed_distance_fade_enabled_requested": "true",
+            }), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("does not prove whether", reason)
+
+            (root / "run_info.json").write_text(json.dumps({
+                **base_info,
+                "indexed_distance_fade_enabled_requested": True,
+            }), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("does not prove the complete", reason)
+
+            matching_profile = {
+                "profile_id": "retail_gameplay_near_1400_600",
+                "visibility_limit": 1400.0,
+                "fade_start": 800.0,
+                "fade_length": 600.0,
+                "distance_space": RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE,
+                "formula": RETAIL_AREA_DISTANCE_FADE_FORMULA,
+            }
+            (root / "run_info.json").write_text(json.dumps({
+                **base_info,
+                "indexed_distance_fade_enabled_requested": True,
+                "indexed_distance_fade_profile_requested": {
+                    **matching_profile,
+                    "visibility_limit": 9999.0,
+                },
+            }), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("different distance-fade profile", reason)
+
+            (root / "run_info.json").write_text(json.dumps({
+                **base_info,
+                "indexed_distance_fade_enabled_requested": True,
+                "indexed_distance_fade_profile_requested": matching_profile,
+            }), encoding="utf-8")
+            self.assertEqual(
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel), "")
+
+            (root / "run_info.json").write_text(json.dumps({
+                **base_info,
+                "indexed_distance_fade_enabled_requested": True,
+                "indexed_distance_fade_profile_requested": {
+                    **matching_profile,
+                    "visibility_limit": "1400.0",
+                },
+            }), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("does not prove the complete", reason)
+
     def test_skip_profile_preflight_is_inactive_when_overwriting(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -285,12 +431,16 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                 fields["requested_flat_tracy_destination_mode"], "")
             self.assertIsNone(
                 fields["effective_flat_tracy_forced_destination_index"])
+            self.assertIsNone(fields["requested_distance_fade_enabled"])
+            self.assertIsNone(fields["effective_distance_fade_enabled"])
+            self.assertIsNone(fields["distance_fade_visibility_limit"])
 
     def test_indexed_attempt_profile_excludes_stale_frame_hash_on_error(self):
         panel = SimpleNamespace(
             _renderer_mode="textured_indexed",
             _flat_tracy_destination_mode="forced_diagnostic",
             _flat_tracy_forced_destination_index=31,
+            _distance_fade_enabled=True,
         )
         attempted = VPSnapshotBatchPanel._renderer_manifest_fields(
             panel,
@@ -319,6 +469,8 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
         )
         self.assertEqual(
             attempted["requested_flat_tracy_forced_destination_index"], 31)
+        self.assertTrue(attempted["requested_distance_fade_enabled"])
+        self.assertIsNone(attempted["effective_distance_fade_enabled"])
         self.assertEqual(
             attempted["effective_flat_tracy_destination_mode"], "")
         self.assertIsNone(
@@ -329,6 +481,7 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             _renderer_mode="textured_indexed",
             _flat_tracy_destination_mode="forced_diagnostic",
             _flat_tracy_forced_destination_index=31,
+            _distance_fade_enabled=True,
         )
         renderer_info = {
             "effective_mode": "retail_indexed_forced_tracy_diagnostic",
@@ -338,6 +491,23 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             "initial_framebuffer_index": 0,
             "initial_framebuffer_rgb": [1, 2, 3],
             "flat_tracy_forced_destination_rgb": [12, 34, 56],
+            "requested_distance_fade_enabled": True,
+            "effective_distance_fade_enabled": True,
+            "distance_fade_visibility_limit": 1400,
+            "distance_fade_start": 800,
+            "distance_fade_length": 600,
+            "distance_fade_distance_space": (
+                RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE),
+            "distance_fade_formula": "static fallback must not be used",
+            "last_render_stats": {
+                "distance_fade_profile": {
+                    "name": "retail_gameplay_near_1400_600",
+                    "visibility_limit": 1400.0,
+                    "fade_start": 800.0,
+                    "fade_length": 600.0,
+                },
+                "distance_fade_formula": RETAIL_AREA_DISTANCE_FADE_FORMULA,
+            },
         }
 
         written = VPSnapshotBatchPanel._renderer_manifest_fields(
@@ -360,6 +530,35 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             written["effective_flat_tracy_forced_destination_rgb"],
             "#0C2238",
         )
+        self.assertTrue(written["requested_distance_fade_enabled"])
+        self.assertTrue(written["effective_distance_fade_enabled"])
+        self.assertEqual(
+            written["distance_fade_profile_id"],
+            "retail_gameplay_near_1400_600")
+        self.assertEqual(written["distance_fade_visibility_limit"], 1400.0)
+        self.assertEqual(written["distance_fade_start"], 800.0)
+        self.assertEqual(written["distance_fade_length"], 600.0)
+        self.assertEqual(
+            written["distance_fade_distance_space"],
+            RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE)
+        self.assertEqual(
+            written["distance_fade_formula"],
+            RETAIL_AREA_DISTANCE_FADE_FORMULA)
+
+        incomplete = dict(renderer_info)
+        incomplete["last_render_stats"] = {
+            "distance_fade_profile": {
+                "name": "retail_gameplay_near_1400_600",
+                "visibility_limit": 1400.0,
+                "fade_start": 800.0,
+                "fade_length": 600.0,
+            },
+            # No raster-stat formula: the static renderer descriptor must not
+            # be substituted into an apparently verified exact row.
+        }
+        with self.assertRaisesRegex(RuntimeError, "raster-stat proof"):
+            VPSnapshotBatchPanel._renderer_manifest_fields(
+                panel, incomplete, status="WRITTEN")
 
         for status in ("EXISTS", "ERROR", "ERROR_EXISTING_RETAINED"):
             fields = VPSnapshotBatchPanel._renderer_manifest_fields(
@@ -374,6 +573,9 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                 fields["effective_flat_tracy_forced_destination_index"])
             self.assertIsNone(
                 fields["effective_initial_framebuffer_index"])
+            self.assertTrue(fields["requested_distance_fade_enabled"])
+            self.assertIsNone(fields["effective_distance_fade_enabled"])
+            self.assertIsNone(fields["distance_fade_start"])
 
         fallback = VPSnapshotBatchPanel._renderer_manifest_fields(
             panel,
@@ -388,6 +590,7 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             fallback["effective_flat_tracy_destination_mode"], "")
         self.assertIsNone(
             fallback["effective_flat_tracy_forced_destination_index"])
+        self.assertIsNone(fallback["effective_distance_fade_enabled"])
 
     def test_live_destination_is_canonical_and_has_no_forced_effective_index(self):
         panel = SimpleNamespace(
@@ -418,6 +621,8 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             fields["effective_flat_tracy_forced_destination_index"])
         self.assertEqual(
             fields["effective_flat_tracy_forced_destination_rgb"], "")
+        self.assertFalse(fields["requested_distance_fade_enabled"])
+        self.assertFalse(fields["effective_distance_fade_enabled"])
 
     def test_atomic_png_replace_failure_preserves_old_final_and_cleans_part(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -561,7 +766,20 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                         effective_forced_index=31,
                         effective_initial_index=0,
                         effective_initial_rgb="#000000",
-                        effective_forced_rgb="#0C2238"),
+                        effective_forced_rgb="#0C2238",
+                        requested_distance_fade_enabled=True,
+                        effective_distance_fade_enabled=True,
+                        distance_fade_profile_id=(
+                            "retail_gameplay_near_1400_600"),
+                        distance_fade_visibility_limit=1400.0,
+                        distance_fade_start=800.0,
+                        distance_fade_length=600.0,
+                        distance_fade_distance_space=(
+                            "radial UA model units from eye"),
+                        distance_fade_formula=(
+                            "b=clamp(shade/256+max(0,(distance-800)/600),"
+                            "0,1); screen-linear fixed brightness selects "
+                            "SHADERMP row")),
                     _row(
                         "EXISTS", "VP/side.png",
                         effective="existing_file_not_verified"),
@@ -577,6 +795,7 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                 _renderer_mode="textured_indexed",
                 _flat_tracy_destination_mode="forced_diagnostic",
                 _flat_tracy_forced_destination_index=31,
+                _distance_fade_enabled=True,
                 window=SimpleNamespace(
                     _setbas=None, _vp_source="", _vp_source_path=""),
                 _sources=[_source()],
@@ -628,6 +847,10 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                 summary["requested_flat_tracy_forced_destination_index"],
                 31,
             )
+            self.assertTrue(summary["requested_distance_fade_enabled"])
+            self.assertEqual(
+                summary["requested_distance_fade_profile"]["profile_id"],
+                "retail_gameplay_near_1400_600")
             self.assertEqual(
                 summary[
                     "verified_written_flat_tracy_destination_profiles"],
@@ -638,6 +861,21 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                     "forced_destination_index": 31,
                 }],
             )
+            self.assertEqual(
+                summary["verified_written_distance_fade_profiles"],
+                [{
+                    "enabled": True,
+                    "profile_id": "retail_gameplay_near_1400_600",
+                    "visibility_limit": 1400.0,
+                    "start": 800.0,
+                    "length": 600.0,
+                    "distance_space": "radial UA model units from eye",
+                    "formula": (
+                        "b=clamp(shade/256+max(0,(distance-800)/600),"
+                        "0,1); screen-linear fixed brightness selects "
+                        "SHADERMP row"),
+                }],
+            )
             self.assertIn("do not alter filenames", summary["note"])
             self.assertIn(
                 "do not alter image filenames",
@@ -646,7 +884,7 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             self.assertEqual(
                 summary["skip_existing_collision_policy"],
                 "populated_output_requires_matching_run_info_renderer_and_"
-                "destination_profile",
+                "destination_and_distance_fade_profile",
             )
             self.assertIsInstance(
                 manifest[0]["effective_initial_framebuffer_index"], int)
@@ -658,6 +896,10 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             self.assertIsNone(
                 manifest[1][
                     "effective_flat_tracy_forced_destination_index"])
+            self.assertTrue(manifest[0]["requested_distance_fade_enabled"])
+            self.assertTrue(manifest[0]["effective_distance_fade_enabled"])
+            self.assertIsNone(
+                manifest[1]["effective_distance_fade_enabled"])
 
     def test_live_run_provenance_nulls_inactive_forced_index_everywhere(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -673,12 +915,23 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
                     effective_destination_class="canonical",
                     effective_initial_index=0,
                     effective_initial_rgb="#000000",
+                    requested_distance_fade_enabled=False,
+                    effective_distance_fade_enabled=False,
+                    distance_fade_visibility_limit=1400.0,
+                    distance_fade_start=800.0,
+                    distance_fade_length=600.0,
+                    distance_fade_distance_space=(
+                        "radial UA model units from eye"),
+                    distance_fade_formula=(
+                        "b=clamp(shade/256+max(0,(distance-800)/600),0,1); "
+                        "screen-linear fixed brightness selects SHADERMP row"),
                 )],
                 _warnings=[],
                 _renderer_mode="textured_indexed",
                 _flat_tracy_destination_mode="live_framebuffer",
                 # The UI may retain a value while its control is inactive.
                 _flat_tracy_forced_destination_index=220,
+                _distance_fade_enabled=False,
                 window=SimpleNamespace(
                     _setbas=None, _vp_source="", _vp_source_path=""),
                 _sources=[_source()],
@@ -720,6 +973,13 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             self.assertIsNone(
                 run_info[
                     "indexed_flat_tracy_forced_destination_index_requested"])
+            self.assertFalse(
+                manifest[0]["requested_distance_fade_enabled"])
+            self.assertFalse(
+                manifest[0]["effective_distance_fade_enabled"])
+            self.assertFalse(summary["requested_distance_fade_enabled"])
+            self.assertFalse(
+                run_info["indexed_distance_fade_enabled_requested"])
 
     def test_zip_contains_only_authorized_images_and_fixed_metadata(self):
         with tempfile.TemporaryDirectory() as temporary:

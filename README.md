@@ -53,8 +53,9 @@ image, fallback reasons, source-table hashes, and exact index-buffer hashes.
 file retained by **Skip existing** as a newly verified indexed render.
 If the chosen batch folder already contains PNGs, **Skip existing** now
 requires its `run_info.json` to prove the same renderer and flat-TRACY
-destination profile; a different or unverifiable profile is refused before
-asset scanning.
+destination and distance-fade profile; a different or unverifiable profile is
+refused before asset scanning. Older indexed manifests with no distance-fade
+field are interpreted as the historical default, **off**.
 
 Snapshot Studio also exposes a **Flat/LUM-TRACY** destination selector. Its
 default **Live framebuffer - retail** setting preserves the source-traced frame
@@ -66,6 +67,31 @@ from the resolved indexed display palette and is never inferred from RGB.
 Live-mode manifests record no forced-row operand, even if the disabled row
 control retains a value for later diagnostic use.
 
+An opt-in **Retail AREA distance fade (1400/600)** checkbox reconstructs the
+normal gameplay fade on mapped, gradient-shaded faces authored with
+`AREA_FLAG_DPTHFADE`. It is off by default so existing v2 close-up captures do
+not change. The gameplay profile begins at 800 Urban Assault model units and
+reaches palette index zero at the 1400-unit visibility limit. The asset stores
+only the eligibility flag; the runtime supplies the visibility and fade-length
+profile. The original BSA class-initialization default is 4096/600 (start
+3496), while mission briefing and other runtime contexts can choose different
+values. In the asset viewer, the profile is evaluated at the current auto-fit
+viewer-camera distance; it is not a recovered mission/world placement. Manual
+Snapshot suggestions add `_DFADE` while the option is active; complete-model
+batch filenames remain unchanged and the requested/effective fade state is
+recorded in their manifests instead.
+
+“Effective” in that provenance means the selected profile reached eligible
+render paths, not that a second fade-disabled frame was rendered and found to
+differ pixel-for-pixel.
+
+The viewer toolbar's **Enable animations** checkbox explicitly starts and
+stops resolved VANM/effect playback. Pausing preserves the current interactive
+frame, and the existing step/reset controls remain available. Manual Snapshot
+exports use the displayed frame. Complete-model batch export deliberately
+ignores live playback: it captures the renderer options once, pauses its hidden
+viewport, and resets every source to the initial frame for reproducible output.
+
 The reconstructed mode keeps source texture and framebuffer pixels as palette
 indices until final display. Ordinary mapped samples use the source-derived
 constant-brightness row in the local game's `SHADERMP`; clear-TRACY skips raw
@@ -74,8 +100,11 @@ shade and composites raw texels as
 `TRACYRMP[current_background][raw_source]`. Transparent source faces are
 replayed through a source-derived publish-depth/LIFO pass instead of being
 interleaved as ordinary BSP fragments. Nearest-neighbor indexed sampling is
-retained for effect cards. This fixes important cases that ordinary RGB
-filtering and additive blending cannot represent, including Taerkasten
+retained for effect cards. When the optional distance fade is enabled, eligible
+AREA faces add the source-traced radial per-vertex distance term before the
+brightness value is interpolated across the polygon. This fixes important
+cases that ordinary RGB filtering and additive blending cannot represent,
+including Taerkasten
 Hauptstation lightning and the distinct clear-TRACY and flat-TRACY propeller
 systems.
 

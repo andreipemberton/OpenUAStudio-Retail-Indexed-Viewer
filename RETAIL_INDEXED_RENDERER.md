@@ -45,6 +45,32 @@ palette index remains authoritative even when two entries share the same RGB.
 Manual export suggestions append `_TRACY_FORCE_NNN_DIAGNOSTIC` while forcing is
 active; users can still choose another filename explicitly.
 
+Snapshot Studio also exposes **Retail AREA distance fade (1400/600)** when the
+reconstructed indexed renderer is selected. It is an explicit opt-in and is
+off by default, preserving the v2 close-camera appearance. When enabled, it
+applies only to mapped gradient-shaded faces carrying the authored
+`AREA_FLAG_DPTHFADE` flag. The standard gameplay profile starts at 800 source
+model units, fades over 600 units, and reaches palette index zero at the
+1400-unit visibility limit. Panning and lens zoom do not change that source
+distance.
+
+The flag is all the asset stores; it does not contain a visibility profile.
+The runtime supplies those values for the active context. The original BSA
+class-initialization default is a 4096-unit visibility limit with a 600-unit
+fade (start 3496), and mission-brief or other runtime contexts may supply a
+different profile. The checkbox intentionally selects the normal 1400/600
+gameplay profile rather than pretending that one value is intrinsic to the
+model. The asset viewer evaluates it at its current auto-fit camera distance;
+that is reproducible source-model space, but it is not a recovered mission or
+world placement.
+
+The top toolbar's **Enable animations** checkbox controls continuous VANM and
+effect-frame playback for both textured renderers. Unchecking it freezes the
+displayed frame; step and reset remain explicit. Manual exports capture that
+displayed state. Complete-model batch export stays deterministic: it captures
+the renderer controls once at batch start, applies them to a hidden viewport,
+keeps animation playback paused, and resets each source to its initial frame.
+
 The reconstructed path requires a legally obtained local 256-entry palette and
 the matching `REMAP/SHADERMP.ILB[M]` and `REMAP/TRACYRMP.ILB[M]` tables. These
 files are read-only inputs. They are neither embedded in nor distributed by
@@ -80,7 +106,11 @@ until the final conversion to an RGBA image:
    exact mode. This prevents a later fan from reversing the source-face cull
    and normally selects one winding of an authored two-sided effect card;
    exactly edge-on zero-area faces may enter and rasterize no samples.
-10. Convert the completed index buffer through the selected palette for display
+10. If the optional AREA distance-fade profile is enabled, add the radial
+    source-model distance term to each eligible vertex's authored shade before
+    screen-linear interpolation selects the `SHADERMP` row. Faces without
+    `AREA_FLAG_DPTHFADE` retain their ordinary constant-shade path.
+11. Convert the completed index buffer through the selected palette for display
    or PNG export.
 
 This distinction matters. A flat effect lookup is generally nonlinear and
@@ -133,12 +163,33 @@ requested renderer, effective renderer, fallback/error reason, source hashes,
 and—when an indexed image was actually written—the exact index-buffer hash.
 They also distinguish the requested and effective flat-TRACY destination
 policy, the fixed initial framebuffer index, and any forced diagnostic row and
-palette swatch RGB. Existing or retained files never inherit those effective
-claims. Destination settings do not alter batch filenames. When **Skip
-existing** is active and the output tree already contains PNGs, the exporter
-therefore requires the prior `run_info.json` to prove the same renderer,
-destination mode, and active forced row. Missing, malformed, or mismatched
-provenance is refused before asset scanning; use a separate output folder or
+palette swatch RGB. Distance-fade provenance records the requested and
+effective state plus the visibility limit, start, length, distance space, and
+formula used for an exact written image. OpenUA-preview rows normalize these
+fade fields to inactive/null, and existing or retained files never inherit
+effective claims. Destination and distance-fade settings do not alter batch
+filenames. Manual Snapshot filename suggestions, separately, append `_DFADE`
+when fade is active.
+
+For enabled fade, the exporter requires the profile ID, parameters, and formula
+reported by the completed indexed raster pass to match the frozen batch
+request before the PNG is committed. Static UI descriptors are not accepted as
+a substitute. Skip-existing likewise requires native JSON numeric fields;
+numeric strings and incomplete enabled-profile records fail closed.
+
+Here, an effective distance-fade state means that eligible render paths were
+processed with the selected runtime profile. It does not assert that the final
+frame differs from a matched fade-disabled render: close views can resolve to
+the same final palette indices even after intermediate shade lookups changed.
+
+When **Skip existing** is active and the output tree already contains PNGs,
+the exporter therefore requires the prior `run_info.json` to prove the same
+renderer, destination mode, active forced row, and—when enabled—the complete
+requested distance-fade profile ID, limits, distance space, and formula. An
+indexed run written before the fade field existed is treated as the backward-
+compatible historical default, fade disabled; an enabled legacy record without
+the full profile fails closed. Other missing, malformed, or mismatched
+provenance is refused before asset scanning. Use a separate output folder or
 disable **Skip existing** to overwrite intentionally.
 
 ## Current limits
@@ -173,10 +224,19 @@ disable **Skip existing** to overwrite intentionally.
   16-, 32-, or 64-pixel cluster endpoints and stepped linearly inside each
   cluster. The viewer currently evaluates floating reciprocal depth per pixel,
   so strong depth gradients can still select different texels.
-- AREA depth fade is distance-dependent per vertex. The bounded viewer now
-  reproduces the source's constant shade-row conversion, which is correct for
-  the close canonical asset cameras while they remain inside `dfade_start`;
-  distant/world views do not yet add and interpolate the per-vertex fade term.
+- AREA depth fade reconstructs the source's radial per-vertex distance term and
+  screen-linear fixed-brightness interpolation for eligible mapped faces. The
+  supplied 1400/600 values represent the normal gameplay profile, not an
+  asset-embedded constant. Other engine contexts can select different runtime
+  visibility profiles and are not inferred automatically by the asset viewer.
+- Retail applied its all-white (`b < 0.01`) and all-black (`b > 0.99`)
+  shortcuts to one clipped source polygon. The viewer groups every BSP fragment
+  carrying the same source-face identity before making that decision, so a
+  split clear face cannot develop an opaque-black fragment seam. Its earlier
+  fan/near-clipping pipeline still differs from retail's whole-polygon clipper,
+  and floating barycentric brightness interpolation approximates the retail
+  fixed-point edge walker. Threshold and edge pixels are therefore
+  source-derived but are not claimed to be instruction-identical.
 - A custom RGB background is a presentation composite after indexed rendering.
   It is never used as a numeric destination index for TRACY lookups. The
   forced-row control is the only UI path that substitutes a lookup operand, and
