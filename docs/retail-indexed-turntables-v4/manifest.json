@@ -1,0 +1,923 @@
+{
+  "schema_version": 1,
+  "release": "v4.0.0",
+  "status": "PASS",
+  "purpose": "bounded public GIF and contact-index subset of the audited retail-indexed animated unit turntables",
+  "contents": {
+    "gif_count": 51,
+    "combat_gif_count": 47,
+    "host_command_gif_count": 4,
+    "gif_bytes": 190174798,
+    "contact_index_count": 1,
+    "contact_index_bytes": 2056673,
+    "binary_bytes": 192231471,
+    "png_master_count_in_git": 0
+  },
+  "capture_profile": {
+    "width": 1024,
+    "height": 1024,
+    "frame_count": 60,
+    "frame_duration_ms": 40,
+    "loop_duration_ms": 2400,
+    "yaw_step_degrees": 6.0,
+    "pitch_degrees": 20.0,
+    "renderer": "retail_indexed_reconstructed",
+    "flat_tracy_destination": "live_framebuffer",
+    "distance_fade": false,
+    "animation_mode": "cycle_fit",
+    "background": "opaque palette-index-zero black",
+    "global_exact_palette": true,
+    "global_palette_sha256": "d485acf64fb0b698e30b10181a95ef63504e07d8f5d89c3c6e68263b7c52255b",
+    "quantization": false,
+    "dithering": false,
+    "transparency": false,
+    "smoothing": false,
+    "image_generation": false,
+    "upscaling": false
+  },
+  "animation_policy": {
+    "description": "authored image and UV order plus frame-duration proportions retained; each active timeline retimed to an integral number of cycles in the 2.4-second loop",
+    "native_gameplay_speed": false,
+    "minimum_speed_ratio_approx": 0.667,
+    "maximum_speed_ratio_approx": 3.613,
+    "active_timelines": 149,
+    "animated_material_instances": 333,
+    "global_cycle_fit_assets": 33,
+    "independent_timeline_cycle_fit_assets": 12,
+    "source_static_assets": 6,
+    "temporal_closure_exact": true
+  },
+  "source_submission_policy": {
+    "default": "fail_closed",
+    "exception_asset": "VP_BRGRO",
+    "exception_policy": "source_atts_only",
+    "exact_omission": {
+      "owner": "root",
+      "polygon_id": 36
+    },
+    "invented_materials": 0
+  },
+  "provenance": {
+    "viewer_commit": "43cb2871d80e2ce354e54b838135d88c3d919dba",
+    "viewer_tree": "0bc6209645d37fa7c1061e7b921c5ac90f8efea7",
+    "capture_script_sha256": "c2f418dcf784351b66e724c51accc260e175bc144c2a03f3930e4a1d788e8ff4",
+    "canonical_set_bas_sha256": "1d65b2ab93622a0593ca23e84f01301c2d2045e49b8baee6adc0d56c17ab4a34",
+    "complete_audit_manifest_sha256": "3195eef3cb3b3ba55cb06878f44dcd73e0dc067d7e09ecf6df94007a90445604",
+    "complete_audit_sha256sums_sha256": "fda2ec3f8acf004bdb1437f3e2e830fe16a881d8601e1d9a913e036c6d66a55e",
+    "contact_index_sha256": "989d9419290a586ee5a510fa18532fdd845acf9defacc5137e4c93cd54f8e65d",
+    "source_data_modified": false
+  },
+  "validation": {
+    "requested": 51,
+    "passed": 51,
+    "failed_closed": 0,
+    "gif_frames_decoded": 3060,
+    "pillow_rgb_mismatches_against_png_masters": 0,
+    "ffmpeg_rgb_mismatches_against_png_masters": 0,
+    "hidden_closure_mismatches": 0,
+    "checksum_mismatches_before_git_packaging": 0,
+    "minimum_foreground_margin_pixels": 106
+  },
+  "assets": [
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 30,
+      "display_name": "Weasel",
+      "base_name": "VP_SIMPL",
+      "vehicle_ids": [
+        1
+      ],
+      "script_names": [
+        "WIESEL"
+      ],
+      "path": "gifs/combat_units/resistance/vp_030__weasel__VP_SIMPL.gif",
+      "bytes": 4060265,
+      "sha256": "5a1c42f4e0ee0433d183370e33e0ec3ec52089543ebb743429df1c59f9702062"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 89,
+      "display_name": "Jaguar / Evilfurz",
+      "base_name": "VP_PANZ2",
+      "vehicle_ids": [
+        2,
+        13
+      ],
+      "script_names": [
+        "JAGUAR",
+        "EVILFURZ"
+      ],
+      "path": "gifs/combat_units/resistance/vp_089__jaguar_evilfurz__VP_PANZ2.gif",
+      "bytes": 4131867,
+      "sha256": "3857f88ac251411f8448a88e59ec7533fb96cfa982727c387e1f8c17b910266b"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 146,
+      "display_name": "Tiger",
+      "base_name": "VP_PANZ3",
+      "vehicle_ids": [
+        3
+      ],
+      "script_names": [
+        "TIGER"
+      ],
+      "path": "gifs/combat_units/resistance/vp_146__tiger__VP_PANZ3.gif",
+      "bytes": 4250554,
+      "sha256": "172e66a4d4837380542e27bcc4d851ae3fc405ccfdee9e85f7103948a7b04c3f"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 71,
+      "display_name": "Falcon",
+      "base_name": "VP_JET1",
+      "vehicle_ids": [
+        4
+      ],
+      "script_names": [
+        "ERAZER"
+      ],
+      "path": "gifs/combat_units/resistance/vp_071__falcon__VP_JET1.gif",
+      "bytes": 2248709,
+      "sha256": "d9cd606e8e0b175f939735a867eca5f33cdd085c7cf91ab0cf05f4840fc26b2c"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 173,
+      "display_name": "Marauder",
+      "base_name": "VP_BOMBA",
+      "vehicle_ids": [
+        5
+      ],
+      "script_names": [
+        "MARAUDER"
+      ],
+      "path": "gifs/combat_units/resistance/vp_173__marauder__VP_BOMBA.gif",
+      "bytes": 2987883,
+      "sha256": "69cedabb99bf0edc074096e1e9f27d1632d72b6bd931d02e4e3430499d6a6c52"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 83,
+      "display_name": "Wasp",
+      "base_name": "VP_WASP",
+      "vehicle_ids": [
+        6
+      ],
+      "script_names": [
+        "WASP"
+      ],
+      "path": "gifs/combat_units/resistance/vp_083__wasp__VP_WASP.gif",
+      "bytes": 1590495,
+      "sha256": "10a5f95380b9ebb7186d540deb67423110ff6769bdfa40e6e42d17f5d43a0a80"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 60,
+      "display_name": "Warhammer",
+      "base_name": "VP_GLID1",
+      "vehicle_ids": [
+        7
+      ],
+      "script_names": [
+        "WARHAMMER"
+      ],
+      "path": "gifs/combat_units/resistance/vp_060__warhammer__VP_GLID1.gif",
+      "bytes": 3059859,
+      "sha256": "546c309f365f2d7385e3ceb51fdca4c89dfe25e1680d3bf916cd40496c3ec1ad"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 42,
+      "display_name": "Scout",
+      "base_name": "VP_SATT1",
+      "vehicle_ids": [
+        9
+      ],
+      "script_names": [
+        "SCOUT"
+      ],
+      "path": "gifs/combat_units/resistance/vp_042__scout__VP_SATT1.gif",
+      "bytes": 1769185,
+      "sha256": "959f109b850dd89b2b8db32c29c7212a261497021930738975e6dcefad4f326c"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 48,
+      "display_name": "Firefly",
+      "base_name": "VP_FLSML",
+      "vehicle_ids": [
+        10
+      ],
+      "script_names": [
+        "KNUDDEL"
+      ],
+      "path": "gifs/combat_units/resistance/vp_048__firefly__VP_FLSML.gif",
+      "bytes": 2627211,
+      "sha256": "0c7df1964e50395e3ca50dfdd8ab53df0b6779daab011d2accd37ff2b7fdf499"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 169,
+      "display_name": "Rock Sled",
+      "base_name": "VP_BUGGY",
+      "vehicle_ids": [
+        11
+      ],
+      "script_names": [
+        "BUDJONOW"
+      ],
+      "path": "gifs/combat_units/resistance/vp_169__rock_sled__VP_BUGGY.gif",
+      "bytes": 3502167,
+      "sha256": "e6a9fb8767579505757e4315c25043a3d670aeee51ba970c3e4caaa6e05a53e3"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 158,
+      "display_name": "Rhino",
+      "base_name": "VP_RT",
+      "vehicle_ids": [
+        12
+      ],
+      "script_names": [
+        "PICO"
+      ],
+      "path": "gifs/combat_units/resistance/vp_158__rhino__VP_RT.gif",
+      "bytes": 5252039,
+      "sha256": "87884216b00ede258fbea6969df4cc1b2c624ed3a68a9b2673b49ef577b34b72"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 24,
+      "display_name": "Dragonfly",
+      "base_name": "VP_HUBI2",
+      "vehicle_ids": [
+        14
+      ],
+      "script_names": [
+        "LAWNMOWER"
+      ],
+      "path": "gifs/combat_units/resistance/vp_024__dragonfly__VP_HUBI2.gif",
+      "bytes": 1788961,
+      "sha256": "451c14641f870731980c9e65573276c389ba4d3572ac5644ff9246b4ea5adfe5"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 106,
+      "display_name": "Hornet",
+      "base_name": "VP_HUBI3",
+      "vehicle_ids": [
+        15
+      ],
+      "script_names": [
+        "LAURIN"
+      ],
+      "path": "gifs/combat_units/resistance/vp_106__hornet__VP_HUBI3.gif",
+      "bytes": 1720908,
+      "sha256": "5f5d8455f13e58adf8035dad26690cf3532f7af1c588e1b56b36959d3699433e"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Resistance",
+      "slot": 209,
+      "display_name": "Fox",
+      "base_name": "VP_NFOX",
+      "vehicle_ids": [
+        16
+      ],
+      "script_names": [
+        "FOX"
+      ],
+      "path": "gifs/combat_units/resistance/vp_209__fox__VP_NFOX.gif",
+      "bytes": 4398369,
+      "sha256": "f9b0b3ad9f90ef6e4d147e2974119660c74baf8344816b0be9e1866b89cfba0b"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 236,
+      "display_name": "Speedy",
+      "base_name": "VP_SPEDY",
+      "vehicle_ids": [
+        22
+      ],
+      "script_names": [
+        "SPEEDY"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_236__speedy__VP_SPEDY.gif",
+      "bytes": 3342517,
+      "sha256": "dc6bbb90b76e126fa3cb752ad4dc9a3b5095e69662c3584353e67880eba8b4e3"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 240,
+      "display_name": "Ying",
+      "base_name": "VP_KUFO",
+      "vehicle_ids": [
+        23
+      ],
+      "script_names": [
+        "UFO"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_240__ying__VP_KUFO.gif",
+      "bytes": 3084558,
+      "sha256": "7d87d137fe168cd15ed37c12fdb13a2976dd086d8ff1313cc2c002308372b640"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 12,
+      "display_name": "Ghargoil",
+      "base_name": "VP_HUBI1",
+      "vehicle_ids": [
+        24
+      ],
+      "script_names": [
+        "GHARGOIL"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_012__ghargoil__VP_HUBI1.gif",
+      "bytes": 3511796,
+      "sha256": "ebbfe80c2f6a7197a68e481008f4738877b2c6d258047238957bc46fa05a7e0d"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 327,
+      "display_name": "Ghargoil 3",
+      "base_name": "VP_HUBI5",
+      "vehicle_ids": [
+        25
+      ],
+      "script_names": [
+        "GHAGOIL_3"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_327__ghargoil_3__VP_HUBI5.gif",
+      "bytes": 3755349,
+      "sha256": "aa1fdd5c4559070e47b35fdbfed904c7f6bbbf087caf4dc48b32583c2d9ddceb"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 101,
+      "display_name": "Tekh-Trak",
+      "base_name": "VP_KPAN1",
+      "vehicle_ids": [
+        26
+      ],
+      "script_names": [
+        "TEKH"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_101__tekh-trak__VP_KPAN1.gif",
+      "bytes": 4600848,
+      "sha256": "60cf1d3119e7b03daa50f687f9239ee7e958b351ef3d500579c8a15ddfdd9d97"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 116,
+      "display_name": "Gigant / Tarantul I",
+      "base_name": "VP_GIGNT",
+      "vehicle_ids": [
+        27
+      ],
+      "script_names": [
+        "GIGANT"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_116__gigant_tarantul_i__VP_GIGNT.gif",
+      "bytes": 3045441,
+      "sha256": "e6b929d27d3912ae660868cc4bbefdc9da23f11d7b2ee3edd2ab46ca42ee9b99"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 272,
+      "display_name": "Ghargoil 2",
+      "base_name": "VP_HUBI4",
+      "vehicle_ids": [
+        28
+      ],
+      "script_names": [
+        "GHARGOIL_2"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_272__ghargoil_2__VP_HUBI4.gif",
+      "bytes": 3071947,
+      "sha256": "3dfb3c7e0d4ad2c3645eea8c52bb954ac56a5d19e8ee7a190d879e15483f872d"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 197,
+      "display_name": "Ghor-Scout",
+      "base_name": "VP_KSATT",
+      "vehicle_ids": [
+        29
+      ],
+      "script_names": [
+        "OHRMU"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_197__ghor-scout__VP_KSATT.gif",
+      "bytes": 1794307,
+      "sha256": "94fd310cb53396a8026977551a8ffecb0885532c250c980ba616bb3cd7021817"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 218,
+      "display_name": "Tien-Ying 7 / Mrat-17",
+      "base_name": "VP_MIG",
+      "vehicle_ids": [
+        31
+      ],
+      "script_names": [
+        "TRICKINA"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_218__tien-ying_7_mrat-17__VP_MIG.gif",
+      "bytes": 2779126,
+      "sha256": "86055329903399bf440bbbd7a40f4c3b0a41612b6321e2863606e59bd777e54c"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Ghorkov",
+      "slot": 54,
+      "display_name": "Yang / Mrat-9",
+      "base_name": "VP_FLUG1",
+      "vehicle_ids": [
+        130
+      ],
+      "script_names": [
+        "FYUGII"
+      ],
+      "path": "gifs/combat_units/ghorkov/vp_054__yang_mrat-9__VP_FLUG1.gif",
+      "bytes": 1921778,
+      "sha256": "8a7fcbb3769aabce301d8e45a4d7aa0abef1c6069961a055ea840c700a33b05a"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 271,
+      "display_name": "Myko Hourglass / Myko Schwer",
+      "base_name": "VP_MYKO4",
+      "vehicle_ids": [
+        63
+      ],
+      "script_names": [
+        "5P2"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_271__myko_hourglass_myko_schwer__VP_MYKO4.gif",
+      "bytes": 7836838,
+      "sha256": "765b6d9fd4bce1d2fd569b096bd674908cc7881a3e41ef877072a6827a9f5089"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 0,
+      "display_name": "Myko XO1 Quadda",
+      "base_name": "VP_BRGR1",
+      "vehicle_ids": [
+        64
+      ],
+      "script_names": [
+        "XO1"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_000__myko_xo1_quadda__VP_BRGR1.gif",
+      "bytes": 6478806,
+      "sha256": "c62bf334cd4ba3908ad7bd3bd2dbf8ea2af5df287dc525832c50247f9cc3bbb3"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 6,
+      "display_name": "Myko 5P0 Air Prism",
+      "base_name": "VP_BRGR2",
+      "vehicle_ids": [
+        65
+      ],
+      "script_names": [
+        "5PO"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_006__myko_5p0_air_prism__VP_BRGR2.gif",
+      "bytes": 1674599,
+      "sha256": "e1db6a8600fa40a8714326e6738c191185d663f5caab380e92e281718405c05f"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 184,
+      "display_name": "Myko Static",
+      "base_name": "VP_BRGR3",
+      "vehicle_ids": [
+        66
+      ],
+      "script_names": [
+        "STTC"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_184__myko_static__VP_BRGR3.gif",
+      "bytes": 2973175,
+      "sha256": "58349629d208a4d9a806d8923dad7c7b091c191c6d5fc303fd3e0113f74f7afb"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 200,
+      "display_name": "Myko Radar",
+      "base_name": "VP_BRGR4",
+      "vehicle_ids": [
+        67
+      ],
+      "script_names": [
+        "RDR"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_200__myko_radar__VP_BRGR4.gif",
+      "bytes": 5632655,
+      "sha256": "f5df2aa6e04b54a05590fefb65741e935ba34dcf8bb68ac0a79807b8f12b5f68"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 270,
+      "display_name": "Myko Ground Cube / Myko Leicht",
+      "base_name": "VP_MYKO2",
+      "vehicle_ids": [
+        68
+      ],
+      "script_names": [
+        "0815"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_270__myko_ground_cube_myko_leicht__VP_MYKO2.gif",
+      "bytes": 4357027,
+      "sha256": "3476ed83f0226e99b2a8a0d07aae57fbebfe0bd27ba63396bd802d818a3f64ef"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 251,
+      "display_name": "Myko Air Stick",
+      "base_name": "VP_MYKO1",
+      "vehicle_ids": [
+        69
+      ],
+      "script_names": [
+        "X00A"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_251__myko_air_stick__VP_MYKO1.gif",
+      "bytes": 1511976,
+      "sha256": "5973538db1288328b507d070835998569da5985f0e03c67abaea062ab9fd054f"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 253,
+      "display_name": "Myko Bomber",
+      "base_name": "VP_MYKO3",
+      "vehicle_ids": [
+        70
+      ],
+      "script_names": [
+        "AMB52"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_253__myko_bomber__VP_MYKO3.gif",
+      "bytes": 5043448,
+      "sha256": "3ab3a973522211c53911f8f4d40eebdd25927923a43070b96190cf5b2f8ef825"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Mykonian",
+      "slot": 370,
+      "display_name": "Crusher",
+      "base_name": "VP_MMYKO",
+      "vehicle_ids": [
+        145
+      ],
+      "script_names": [
+        "Crusher"
+      ],
+      "path": "gifs/combat_units/mykonian/vp_370__crusher__VP_MMYKO.gif",
+      "bytes": 1380942,
+      "sha256": "2ac107918b5f8ce872372f0888cbc5bc343e6f62294ccb7b2396fac6403aa175"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 77,
+      "display_name": "Phantom",
+      "base_name": "VP_GLID2",
+      "vehicle_ids": [
+        8
+      ],
+      "script_names": [
+        "PHANTOM"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_077__phantom__VP_GLID2.gif",
+      "bytes": 1639404,
+      "sha256": "5b7152b1ae6bfca7eb027e2a9da1537976707260c7d1c29e9ccf8e35030537fb"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 18,
+      "display_name": "Eisenhans",
+      "base_name": "VP_PANZ1",
+      "vehicle_ids": [
+        32
+      ],
+      "script_names": [
+        "EISENHANS"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_018__eisenhans__VP_PANZ1.gif",
+      "bytes": 4031061,
+      "sha256": "226a3d37199e75d3dc4f7c7b25b0a12ac3932bd437ff4547f99b60d8f689c544"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 332,
+      "display_name": "Hetzel",
+      "base_name": "VP_FLUG2",
+      "vehicle_ids": [
+        33
+      ],
+      "script_names": [
+        "HETZEL"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_332__hetzel__VP_FLUG2.gif",
+      "bytes": 2951801,
+      "sha256": "2776ab152ea7a5194748344fefe9727552a103bd4e84913f77cf7f690a33c0c1"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 153,
+      "display_name": "Bronsteijn",
+      "base_name": "VP_SATT2",
+      "vehicle_ids": [
+        34
+      ],
+      "script_names": [
+        "BRONSTEIJN"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_153__bronsteijn__VP_SATT2.gif",
+      "bytes": 1423784,
+      "sha256": "fa8175dec04a981b855dc09f45a79815f1c900b82e59ebbcf8732769f97cba98"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 243,
+      "display_name": "Ormu-Scout / Otschko",
+      "base_name": "VP_SATT3",
+      "vehicle_ids": [
+        35
+      ],
+      "script_names": [
+        "OTSCHKO"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_243__ormu-scout_otschko__VP_SATT3.gif",
+      "bytes": 1717992,
+      "sha256": "7909d18b7f076bd62ec9b4c2b564edc73820c5957382b6e3ae4a3c8c2e2b0099"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 201,
+      "display_name": "Serp",
+      "base_name": "VP_TSERP",
+      "vehicle_ids": [
+        36
+      ],
+      "script_names": [
+        "SERP"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_201__serp__VP_TSERP.gif",
+      "bytes": 1768352,
+      "sha256": "d31bea4c0543e9a1cd3ca7beaf413bc054e31471d99f1cf003be77f7047949c0"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 214,
+      "display_name": "Leonid",
+      "base_name": "VP_PANZ4",
+      "vehicle_ids": [
+        37
+      ],
+      "script_names": [
+        "LEONID"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_214__leonid__VP_PANZ4.gif",
+      "bytes": 5043062,
+      "sha256": "eaf7361f40e26b4df20128150eb7a4da6daf0459a0ca8b158bb1e2c719e84d28"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 163,
+      "display_name": "Mnosjetz",
+      "base_name": "VP_TFLUG",
+      "vehicle_ids": [
+        38
+      ],
+      "script_names": [
+        "MNOSJETZ"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_163__mnosjetz__VP_TFLUG.gif",
+      "bytes": 3000034,
+      "sha256": "7f7b81fd8eb80bd6b9bb55aec264eb8eb71c0edb229d17c42fa799417e219926"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 248,
+      "display_name": "Zeppelin",
+      "base_name": "VP_ZEPPL",
+      "vehicle_ids": [
+        131
+      ],
+      "script_names": [
+        "ZEPPELIN"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_248__zeppelin__VP_ZEPPL.gif",
+      "bytes": 4791001,
+      "sha256": "81d751f10681e34ad2b28f40863a255a274117d2196942344ba6c190abbd49f0"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 366,
+      "display_name": "Thor's Hammer",
+      "base_name": "VP_TODIN",
+      "vehicle_ids": [
+        143
+      ],
+      "script_names": [
+        "Thors_Hammer"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_366__thor_s_hammer__VP_TODIN.gif",
+      "bytes": 5864000,
+      "sha256": "7a14ac2bc5a231567f88e1e0fbab18122a155efc6c886478c5beafdde30bf528"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Taerkasten",
+      "slot": 362,
+      "display_name": "Kettenfahrzeug / Katjuscha / Ostwind",
+      "base_name": "VP_TKATJ",
+      "vehicle_ids": [
+        144
+      ],
+      "script_names": [
+        "Kettenfahrzeug"
+      ],
+      "path": "gifs/combat_units/taerkasten/vp_362__kettenfahrzeug_katjuscha_ostwind__VP_TKATJ.gif",
+      "bytes": 5376841,
+      "sha256": "2490b1dbca2852fd212c54aad88c708a280150b22194c1938e33aac1f3341026"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Sulgogar",
+      "slot": 212,
+      "display_name": "Mean Green",
+      "base_name": "VP_SULG5",
+      "vehicle_ids": [
+        71
+      ],
+      "script_names": [
+        "MOAUS-Z"
+      ],
+      "path": "gifs/combat_units/sulgogar/vp_212__mean_green__VP_SULG5.gif",
+      "bytes": 3867066,
+      "sha256": "a075a8841104a533194a1061919b234d5d3283773b3cb673406d198d6f8060b0"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Sulgogar",
+      "slot": 142,
+      "display_name": "Slime Lord / Sulgogar Queen",
+      "base_name": "VP_SULG1",
+      "vehicle_ids": [
+        72
+      ],
+      "script_names": [
+        "AMM-O"
+      ],
+      "path": "gifs/combat_units/sulgogar/vp_142__slime_lord_sulgogar_queen__VP_SULG1.gif",
+      "bytes": 2800609,
+      "sha256": "2abe8a939c8208098e8fa408c365f4f4a826e2c2ea1ceb3de993624ab72a9573"
+    },
+    {
+      "category": "combat_units",
+      "faction": "Sulgogar",
+      "slot": 177,
+      "display_name": "Blue Spore / Little Brother",
+      "base_name": "VP_SULG2",
+      "vehicle_ids": [
+        73,
+        74
+      ],
+      "script_names": [
+        "WHOA-N",
+        "ROA-O"
+      ],
+      "path": "gifs/combat_units/sulgogar/vp_177__blue_spore_little_brother__VP_SULG2.gif",
+      "bytes": 603358,
+      "sha256": "7cdfb324195292f3d2ca45d2f5fbb468bdd5749a4c84b6b8e1ef0bec7d10d4ae"
+    },
+    {
+      "category": "host_command_units",
+      "faction": "Resistance",
+      "slot": 115,
+      "display_name": "Resistance Host Station",
+      "base_name": "VP_ROBO",
+      "vehicle_ids": [
+        56
+      ],
+      "script_names": [
+        "STATION_USR"
+      ],
+      "path": "gifs/host_command_units/resistance/vp_115__resistance_host_station__VP_ROBO.gif",
+      "bytes": 7264209,
+      "sha256": "789e73cc4fce24b36546358a24df91d455a4666ae4cc759a486d2e37fe7b752d"
+    },
+    {
+      "category": "host_command_units",
+      "faction": "Ghorkov",
+      "slot": 126,
+      "display_name": "Turantul II / Skorpio",
+      "base_name": "VP_KROBO",
+      "vehicle_ids": [
+        57,
+        177
+      ],
+      "script_names": [
+        "KYTERNESER",
+        "Tarantul_II"
+      ],
+      "path": "gifs/host_command_units/ghorkov/vp_126__turantul_ii_skorpio__VP_KROBO.gif",
+      "bytes": 7734910,
+      "sha256": "5a3c4cd8cff84935766706c73091b5a3a3a4c19a8e89e7d569a201d62f0bdb20"
+    },
+    {
+      "category": "host_command_units",
+      "faction": "Mykonian",
+      "slot": 127,
+      "display_name": "Myko Station / Mykoniac",
+      "base_name": "VP_BRGRO",
+      "vehicle_ids": [
+        58
+      ],
+      "script_names": [
+        "MYKONIAC"
+      ],
+      "path": "gifs/host_command_units/mykonian/vp_127__myko_station_mykoniac__VP_BRGRO.gif",
+      "bytes": 11861102,
+      "sha256": "293e318318b75bfa49dda56fc1dc4df7dfb0b42f569088517d64fc3fdedb95b6"
+    },
+    {
+      "category": "host_command_units",
+      "faction": "Taerkasten",
+      "slot": 36,
+      "display_name": "Taerkasten Flying Fortress / Hauptstation",
+      "base_name": "VP_TAERO",
+      "vehicle_ids": [
+        60,
+        178
+      ],
+      "script_names": [
+        "TAERCAST",
+        "Flying_Fortress"
+      ],
+      "path": "gifs/host_command_units/taerkasten/vp_036__taerkasten_flying_fortress_hauptstation__VP_TAERO.gif",
+      "bytes": 7250607,
+      "sha256": "1f67feb6c412468bf44d26326cb7d7a264a7a7b73d14426613ce913fbf6d6df6"
+    }
+  ],
+
+  "distribution_boundary": {
+    "included": [
+      "51 final GIFs",
+      "one nearest-neighbor contact index",
+      "navigation and provenance documentation",
+      "published-file SHA-256 checksums"
+    ],
+    "excluded": [
+      "3060 lossless PNG master frames",
+      "51 per-asset quarter-turn contacts",
+      "per-asset private audit manifests",
+      "game archives and extracted source assets",
+      "executables"
+    ]
+  }
+}

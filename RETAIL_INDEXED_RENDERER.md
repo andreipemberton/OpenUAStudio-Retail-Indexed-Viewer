@@ -287,6 +287,9 @@ clear-TRACY propellers against frozen index-buffer hashes. It also locks one
 Hauptstation forced-row-13 diagnostic oracle without replacing the canonical
 live-framebuffer result, plus an opt-in Hauptstation distance-fade oracle that
 checks the complete 1400/600 profile and interpolated vertex-brightness path.
+The `VP_BRGRO` oracle separately proves that the opt-in `source_atts_only`
+submission policy omits exactly unmapped `root/36` and invents no replacement
+material; ordinary incomplete mappings continue to fail closed.
 
 ## Scope and licensing
 
@@ -297,4 +300,8 @@ through `main.py`.
 
 Code remains under the repository's GPL-3.0-only license and upstream notices.
 Urban Assault models, textures, palettes, remap tables, names, and other game
-content remain third-party property and are not redistributed here.
+content remain third-party property. No raw or extractable game archives,
+palettes, remap tables, meshes, textures, or animations are redistributed here.
+Version 4 does include bounded derived [animated reference
+renders](docs/retail-indexed-turntables-v4/README.md); their catalog contains a
+specific provenance and rights notice, and they are not relicensed as GPL code.

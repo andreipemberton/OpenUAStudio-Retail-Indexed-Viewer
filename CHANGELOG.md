@@ -8,6 +8,8 @@ release line.
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-08-18
+
 ### Added
 
 - The indexed viewport now has an explicit `source_atts_only` unmapped-polygon
@@ -16,12 +18,23 @@ release line.
   absent from every source material mapping, inventories every omission in
   renderer provenance, and never invents a material or substitutes the OpenUA
   preview.
+- A bounded public reference corpus of **51** animated 1024 x 1024
+  retail-indexed unit turntables: 47 deduplicated combat models from the five
+  shipped faction scripts and four host/command models from `ROBOS.SCR`.
+- A 51-unit contact index, navigable per-unit GIF catalog, capture-provenance
+  manifest, and exact SHA-256 list. The Git boundary includes the final GIFs
+  and index but excludes all 3,060 lossless PNG masters and proprietary game
+  source assets.
 
 ### Changed
 
 - Incomplete ATTS coverage still fails closed by default. The source-ATTS-only
   path is opt-in so an editor parsing or extraction error cannot silently
   remove geometry from an ordinary exact export.
+- Animated reference loops use deterministic cycle fitting. Authored image/UV
+  order and frame-duration proportions are retained, but timelines are retimed
+  through integral cycles so camera and material state both close exactly at
+  2.4 seconds; they are not represented as native-speed gameplay captures.
 
 ### Validation
 
@@ -30,6 +43,10 @@ release line.
   The skip is the optional legacy `UA_RC1` corpus, which is not installed on
   this machine. The gate includes a real-data `VP_BRGRO` framebuffer oracle
   proving that only authored orphan polygon `root/36` is omitted.
+- All 51 GIFs passed exact palette and temporal-closure validation. Pillow and
+  FFmpeg independently decoded all **3,060** GIF frames byte-identically to
+  their lossless PNG masters, and all published media bytes were rehashed
+  before packaging.
 
 ## [3.1.0] - 2026-08-17
 
@@ -199,7 +216,8 @@ release line.
   renderer classification so it cannot be mistaken for canonical retail
   reconstruction output.
 
-[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/Stable...v2.0.0

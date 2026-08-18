@@ -15,7 +15,7 @@ Features, file layouts, commands, dependencies, workflows, and user-interface el
 The current repository should be treated as a development version rather than a final product specification.
 
 The latest tagged release of this fork is [OpenUAStudio Retail Indexed Viewer
-v3.1.0](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v3.1.0).
+v4.0.0](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v4.0.0).
 
 ## Basic use
 
@@ -28,9 +28,11 @@ python main.py
 On normal startup, OpenUAStudio first shows a tool selector for the Model
 Editor, Snapshot Studio, Map Editor, Collision Editor, or Wireframe Editor.
 
-The v3 fork release is source-only. Build or run it from source; a prebuilt
-executable inherited in upstream Git history is not present in the v3 tree or
-GitHub source archives.
+The current fork release distributes the application as source code rather
+than as a prebuilt executable. Build or run it from source; the stale executable
+inherited in upstream Git history is not present in the current tree or GitHub
+source archives. Version 4 also includes derived visual-reference media, as
+described in the third-party notice below, but no raw game assets.
 
 ### Viewer-only launch
 
@@ -69,6 +71,21 @@ selection-preserving SET.BAS context-menu previews, and updates the associated
 UI/export contracts without weakening unresolved-dependency protection. Its
 canonical-enabled headless suite runs 497 tests with 496 passes, no failures or
 errors, and one skipped optional `UA_RC1` corpus test.
+
+Version 4.0.0 adds a narrowly scoped `source_atts_only` indexed-capture policy
+for source-forensic cases where the original mapping-driven renderer did not
+submit an unmapped skeleton polygon. The default remains fail-closed. The
+policy is exercised against `VP_BRGRO`, where the shipped AMESH ATTS and AREA
+ADE tables account for every polygon except `root/36`; no replacement material
+or geometry is invented.
+
+The release also publishes a bounded set of [51 retail-indexed animated unit
+turntables](docs/retail-indexed-turntables-v4/README.md) and an
+[all-unit visual index](docs/retail-indexed-turntables-v4/index.png). These are
+direct 1024 x 1024 renderer captures with deterministic cycle-fit animation,
+not image-generated or upscaled artwork and not native-speed gameplay footage.
+The repository includes the final GIFs and contact index, but excludes all
+3,060 PNG master frames and all proprietary game archives and source assets.
 
 ### Reconstructed retail-indexed renderer
 
@@ -155,7 +172,7 @@ smoothing, color grading, or upscaling.
 See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
 fail-closed export rules, current limits, and reproducible test commands.
 The Retail Indexed Viewer release line begins at **v2.0.0**; the current
-upstream-synchronized release is **v3.1.0**. Ongoing user-visible changes are
+release is **v4.0.0**. Ongoing user-visible changes are
 maintained in [CHANGELOG.md](CHANGELOG.md).
 
 The mode requires a lawfully obtained local game data set containing a
@@ -252,6 +269,20 @@ This notice is intended to clarify ownership and project scope.
 It is not legal authorization to redistribute third-party material and does not replace permission from the relevant rights holders.
 
 A rights holder who believes that material has been included improperly may contact the repository owner through the GitHub repository so the material can be reviewed.
+
+### Retail-indexed unit turntable captures
+
+Version 4 includes [51 animated unit turntables and one contact
+index](docs/retail-indexed-turntables-v4/README.md) rendered from a lawfully
+obtained local Urban Assault installation. They are technical documentation
+captures from the reconstructed renderer, not raw or extractable game archives,
+palettes, remap tables, meshes, textures, animations, or executables. The 3,060
+lossless PNG master frames and the local game inputs are not distributed.
+
+The captures are not image-generated or upscaled, but the depicted Urban
+Assault models, textures, names, and designs remain third-party visual content.
+They are not OpenUAStudio source code and are not relicensed under the GPL. The
+media catalog contains the more specific capture, provenance, and rights notice.
 
 ## Safety and data handling
 
