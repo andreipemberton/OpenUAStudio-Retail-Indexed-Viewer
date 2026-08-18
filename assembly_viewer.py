@@ -92,6 +92,10 @@ FLAT_TRACY_DESTINATION_MODES = (
     "live_framebuffer",
     "forced_diagnostic",
 )
+RETAIL_UNMAPPED_POLYGON_POLICIES = (
+    "fail_closed",
+    "source_atts_only",
+)
 RETAIL_AREA_DISTANCE_FADE_PROFILE_ID = "retail_gameplay_near_1400_600"
 RETAIL_AREA_DISTANCE_FADE_VISIBILITY_LIMIT = 1400.0
 RETAIL_AREA_DISTANCE_FADE_LENGTH = 600.0
@@ -584,6 +588,11 @@ class AssetViewport(QWidget):
         # supplied 1400/600 at runtime; this explicit near profile is opt-in so
         # v2.0 close-up reference hashes remain unchanged by default.
         self._retail_area_distance_fade_enabled = False
+        # Retail AMESH submits ATTS polygons and AREA submits its ADE mappings;
+        # neither path invents a material for an otherwise orphaned POL2.
+        # Keep omission opt-in because an editor-side parser or extraction
+        # error must not silently erase geometry from an exact export.
+        self._retail_unmapped_polygon_policy = "fail_closed"
 
         # Geometry Edit Mode (Blender-style vertex editing)
         self._edit_session: GeometryEditSession | None = None
@@ -2813,6 +2822,34 @@ class AssetViewport(QWidget):
 
         self.set_retail_area_distance_fade_enabled(enabled)
 
+    def set_retail_unmapped_polygon_policy(self, policy: str) -> None:
+        """Choose strict ATTS coverage or retail's mapped-face submission.
+
+        ``source_atts_only`` reproduces the source loops, which publish AMESH
+        ATTS and AREA ADE mappings but no otherwise orphaned skeleton polygon.
+        The strict default remains appropriate for general editor exports
+        because it exposes incomplete parsing or accidental material loss.
+        """
+
+        if policy not in RETAIL_UNMAPPED_POLYGON_POLICIES:
+            raise ValueError(
+                "retail unmapped polygon policy must be fail_closed or "
+                "source_atts_only")
+        if policy == self._retail_unmapped_polygon_policy:
+            return
+        self._retail_unmapped_polygon_policy = policy
+        self._invalidate_last_render_metadata()
+        if policy == "source_atts_only":
+            self.statusMessage.emit(
+                "Retail indexed rendering will submit source-mapped faces "
+                "only; every omitted skeleton polygon is recorded in "
+                "provenance.")
+        else:
+            self.statusMessage.emit(
+                "Retail indexed rendering will fail closed on any skeleton "
+                "polygon without an ATTS material mapping.")
+        self.update()
+
     @property
     def retail_area_distance_fade_enabled(self) -> bool:
         return self._retail_area_distance_fade_enabled
@@ -2820,6 +2857,16 @@ class AssetViewport(QWidget):
     @property
     def distance_fade_enabled(self) -> bool:
         return self._retail_area_distance_fade_enabled
+
+    @property
+    def retail_unmapped_polygon_policy(self) -> str:
+        return self._retail_unmapped_polygon_policy
+
+    def _unmapped_polygon_inventory(self) -> list[dict[str, object]]:
+        return [
+            {"owner": str(face.owner), "polygon_id": int(face.poly_id)}
+            for face in self._faces if not face.mapped
+        ]
 
     @property
     def flat_tracy_destination_mode(self) -> str:
@@ -2904,6 +2951,7 @@ class AssetViewport(QWidget):
         selected_rgb = self.flat_tracy_destination_display_rgb
         raw_rgb = self.flat_tracy_destination_raw_rgb
         forced_index = self.flat_tracy_forced_destination_index
+        unmapped_inventory = self._unmapped_polygon_inventory()
         requested_distance_fade = bool(
             requested == "textured_indexed"
             and self._retail_area_distance_fade_enabled)
@@ -2950,6 +2998,20 @@ class AssetViewport(QWidget):
             ),
             "canonical_retail_destination_policy": (
                 self._flat_tracy_destination_mode == "live_framebuffer"),
+            "requested_unmapped_polygon_policy": (
+                self._retail_unmapped_polygon_policy),
+            "effective_unmapped_polygon_policy": (
+                self._retail_unmapped_polygon_policy
+                if self._last_effective_renderer in INDEXED_EFFECTIVE_RENDERERS
+                else None),
+            "unmapped_source_polygon_count": len(unmapped_inventory),
+            "unmapped_source_polygon_identities": unmapped_inventory,
+            "unmapped_polygon_policy_scope": (
+                "fail_closed is the editor-safe default; source_atts_only "
+                "reproduces retail AMESH ATTS and AREA ADE submission without "
+                "synthesizing a material for otherwise orphaned skeleton "
+                "polygons"
+            ),
             "source_faithful_frame_clear": True,
             "source_faithful_flat_destination_reads": (
                 self._flat_tracy_destination_mode == "live_framebuffer"),
@@ -3051,6 +3113,8 @@ class AssetViewport(QWidget):
                     self._flat_tracy_forced_destination_index),
                 "retail_area_distance_fade_enabled": (
                     self._retail_area_distance_fade_enabled),
+                "retail_unmapped_polygon_policy": (
+                    self._retail_unmapped_polygon_policy),
             }
             self._snapshot_current_camera = camera.copy()
             self._snapshot_current_camera["pan"] = QPointF(camera["pan"])
@@ -3091,6 +3155,8 @@ class AssetViewport(QWidget):
                 "flat_tracy_forced_destination_index"]
             self._retail_area_distance_fade_enabled = state[
                 "retail_area_distance_fade_enabled"]
+            self._retail_unmapped_polygon_policy = state[
+                "retail_unmapped_polygon_policy"]
         # The snapshot's renderer/hash metadata describes the temporary
         # camera and mode, not the restored workspace.  Leave no stale exact
         # claim visible while the normal viewport awaits its next repaint.
@@ -3599,7 +3665,7 @@ class AssetViewport(QWidget):
         if adapter is None:
             raise RuntimeError(self._indexed_unavailable_reason)
         unmapped = [face for face in self._faces if not face.mapped]
-        if unmapped:
+        if unmapped and self._retail_unmapped_polygon_policy == "fail_closed":
             examples = ", ".join(
                 f"{face.owner} polygon {face.poly_id}"
                 for face in unmapped[:4])
@@ -3637,6 +3703,13 @@ class AssetViewport(QWidget):
         for piece in ordered:
             payload = piece.payload
             face = payload.face
+            # This guard complements the pre-BSP filter in _render_scene.
+            # Direct callers must not accidentally resolve or draw a source
+            # polygon that retail AMESH never submitted.
+            if (not face.mapped
+                    and self._retail_unmapped_polygon_policy
+                    == "source_atts_only"):
+                continue
             material = self._materials[face.material]
             frame_index, _direction = self._anim_states.get(
                 face.material, (0, 1))
@@ -3706,7 +3779,17 @@ class AssetViewport(QWidget):
             width * 4,
             QImage.Format.Format_RGBA8888,
         ).copy()
+        omitted_inventory = self._unmapped_polygon_inventory()
         self._last_indexed_stats = dict(result.stats)
+        self._last_indexed_stats.update({
+            "unmapped_polygon_policy": self._retail_unmapped_polygon_policy,
+            "unmapped_source_polygon_count": len(omitted_inventory),
+            "unmapped_source_polygon_identities": omitted_inventory,
+            "unmapped_source_polygons_omitted": (
+                len(omitted_inventory)
+                if self._retail_unmapped_polygon_policy == "source_atts_only"
+                else 0),
+        })
         self._indexed_runtime_error = ""
         return image
 
@@ -3905,6 +3988,14 @@ class AssetViewport(QWidget):
             for face_order, face in enumerate(self._faces):
                 if (not clean and not face.mapped
                         and not self._mapping_diagnostics):
+                    continue
+                if (mode == "textured_indexed" and not face.mapped
+                        and self._retail_unmapped_polygon_policy
+                        == "source_atts_only"):
+                    # Retail AMESH iterates ATTS and AREA iterates its explicit
+                    # mappings, not every skeleton POL2. Remove an authored
+                    # orphan before BSP so invisible geometry cannot split or
+                    # reorder mapped faces.
                     continue
                 cam = tuple(
                     self._camera_vertex(vertex, camera)

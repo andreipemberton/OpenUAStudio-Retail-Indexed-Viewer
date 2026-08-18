@@ -149,11 +149,28 @@ Exact export refuses, among other cases:
 - absent, malformed, or structurally incompatible palette/remap tables;
 - ambiguous palette candidates unless every candidate has a complete,
   byte-identical palette/SHADERMP/TRACYRMP profile;
-- incomplete ATTS polygon-to-material mappings;
+- incomplete ATTS polygon-to-material mappings under the default
+  `fail_closed` policy;
 - incomplete source UV mappings;
 - polygon-flag combinations that the retail AMESH dispatcher did not publish;
 - mapped-TRACY materials, whose retail semantics are not yet established; and
 - output dimensions above the active backend's bounded memory budget.
+
+### Source-ATTS-only polygon submission
+
+Retail AMESH iterates its ATTS records and asks the skeleton for each recorded
+polygon ID, while AREA publishes its explicitly mapped ADE polygons. A
+skeleton polygon absent from every source material mapping is not submitted to
+the rasterizer. The viewport exposes `source_atts_only` as an explicit opt-in
+policy for reproducing that behavior on verified source assets. Its default
+remains `fail_closed`, because an incomplete editor parse or accidental
+material loss must not silently erase geometry from an ordinary exact export.
+
+The opt-in path removes unmapped polygons before camera BSP construction, so a
+face that retail never submitted cannot split or reorder mapped geometry. It
+does not assign NNN, copy a neighboring material, invent UVs, or export an
+OpenUA-preview fallback. Renderer metadata and raster statistics record the
+policy, omitted count, and exact `(owner, polygon_id)` inventory.
 
 Batch PNGs are written to a sibling temporary file and atomically promoted. An
 older output that survives a failed overwrite is explicitly classified as

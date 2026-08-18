@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -387,6 +388,61 @@ class IndexedViewerIntegrationTests(unittest.TestCase):
         info = viewport.indexed_renderer_info
         self.assertTrue(info["fallback_used"])
         self.assertIn("unmapped polygon", info["fallback_reason"])
+
+    def test_explicit_source_atts_policy_omits_before_bsp_with_provenance(self):
+        viewport = _viewport(mapped=False)
+        resolved = []
+        surface = IndexedSurface(
+            "solid", "solid", None, 0, 0, None, 23,
+            "none", 0, "none", "linear")
+
+        def resolve(face, *_args):
+            resolved.append(face.poly_id)
+            return surface
+
+        viewport._indexed_adapter = SimpleNamespace(
+            source_info={}, tables=_tables(), resolve_surface=resolve)
+        viewport.set_retail_unmapped_polygon_policy("source_atts_only")
+
+        with patch("assembly_viewer.order_camera_polygons", wraps=lambda x: x) \
+                as order:
+            image = viewport.render_snapshot(QSize(32, 32), None)
+
+        self.assertFalse(image.isNull())
+        self.assertEqual(order.call_args.args[0], [])
+        self.assertEqual(resolved, [])
+        info = viewport.indexed_renderer_info
+        self.assertEqual(
+            info["effective_unmapped_polygon_policy"], "source_atts_only")
+        self.assertEqual(info["unmapped_source_polygon_count"], 1)
+        self.assertEqual(
+            info["unmapped_source_polygon_identities"],
+            [{"owner": "root", "polygon_id": 7}],
+        )
+        stats = info["last_render_stats"]
+        self.assertEqual(stats["ordered_piece_count"], 0)
+        self.assertEqual(stats["unmapped_source_polygons_omitted"], 1)
+        self.assertEqual(
+            stats["unmapped_source_polygon_identities"],
+            [{"owner": "root", "polygon_id": 7}],
+        )
+
+    def test_unmapped_policy_validation_invalidation_and_snapshot_restore(self):
+        viewport = _viewport(mapped=False)
+        self.assertEqual(
+            viewport.retail_unmapped_polygon_policy, "fail_closed")
+        with self.assertRaisesRegex(ValueError, "fail_closed"):
+            viewport.set_retail_unmapped_polygon_policy("invent_material")
+
+        viewport._last_indexed_stats = {"index_buffer_sha256": "stale"}
+        viewport.begin_snapshot_mode(None)
+        viewport.set_retail_unmapped_polygon_policy("source_atts_only")
+        self.assertEqual(viewport.indexed_renderer_info["last_render_stats"], {})
+        restored = viewport.end_snapshot_mode()
+
+        self.assertEqual(restored, "textured_indexed")
+        self.assertEqual(
+            viewport.retail_unmapped_polygon_policy, "fail_closed")
 
     def test_secondary_object_keeps_unmapped_geometry_for_exact_audit(self):
         viewport = AssetViewport()

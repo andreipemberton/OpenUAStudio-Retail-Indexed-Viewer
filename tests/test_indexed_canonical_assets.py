@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -25,6 +26,8 @@ from PySide6.QtWidgets import QApplication
 
 from assembly_viewer import AssetViewport
 from asset_family import load_asset_family
+from base_mapping_editor import export_base_object_bytes
+from base_parser import parse_base_file
 
 
 PROJECT_ROOT = os.environ.get("OPENUA_CANONICAL_PROJECT_ROOT", "")
@@ -247,6 +250,62 @@ class IndexedCanonicalAssetTests(unittest.TestCase):
         )
         self.assertEqual(stats["flat_tracy_changed_samples"], 8141)
         self.assertEqual(stats["unique_framebuffer_indices"], 153)
+
+    def test_myko_host_source_atts_only_matches_runtime_submission(self):
+        """The retail AMESH loop does not submit its orphan POL2 #36."""
+
+        archive = parse_base_file(self.setbas)
+        candidates = [
+            item for item in archive.all_objects()
+            if str(item.name or "").casefold() == "vp_brgro"
+        ]
+        self.assertEqual(len(candidates), 1)
+        source_bytes = self.setbas.read_bytes()
+        exported = export_base_object_bytes(source_bytes, candidates[0])
+
+        with tempfile.TemporaryDirectory(prefix="ua_brgro_oracle_") as temp:
+            base_path = Path(temp) / "VP_BRGRO.base"
+            base_path.write_bytes(exported)
+            family = load_asset_family(
+                base_path,
+                [self.set1],
+                {"STANDARD.PAL": self.set1 / "PALETTE" / "Standard.pal"},
+                setbas=self.setbas,
+            )
+            viewport = AssetViewport()
+            viewport.load_family(family)
+            self.assertEqual(
+                viewport._unmapped_polygon_inventory(),
+                [{"owner": "root", "polygon_id": 36}],
+            )
+            viewport.set_mode("textured_indexed")
+            viewport.begin_snapshot_mode(QColor("#000000"))
+            viewport.set_retail_unmapped_polygon_policy("source_atts_only")
+            viewport.set_animation_time_ms(0.0)
+            viewport.apply_view_preset("Front", QSize(512, 512), 88)
+            image = viewport.render_snapshot(
+                QSize(512, 512), QColor("#000000"), include_guides=False)
+
+        self.assertFalse(image.isNull())
+        info = viewport.indexed_renderer_info
+        self.assertEqual(
+            info["effective_unmapped_polygon_policy"], "source_atts_only")
+        self.assertEqual(
+            info["unmapped_source_polygon_identities"],
+            [{"owner": "root", "polygon_id": 36}],
+        )
+        stats = info["last_render_stats"]
+        self.assertEqual(stats["unmapped_source_polygons_omitted"], 1)
+        self.assertEqual(
+            stats["index_buffer_sha256"],
+            "1b6af36ad0234f9f26c521b991bf862208092bc10cb1f2c26946d2c7a90f19c6",
+        )
+        self.assertEqual(stats["covered_pixels"], 83555)
+        self.assertEqual(stats["unique_framebuffer_indices"], 176)
+        self.assertEqual(stats["flat_tracy_source_face_count"], 7)
+        self.assertEqual(stats["flat_tracy_samples"], 55777)
+        self.assertEqual(stats["flat_tracy_changed_samples"], 38365)
+        self.assertEqual(stats["transparent_samples_occluded"], 50103)
 
     def test_hauptstation_top_retail_gameplay_distance_fade_oracle(self):
         """Lock the real viewer-to-BSP-to-indexed fade channel path."""

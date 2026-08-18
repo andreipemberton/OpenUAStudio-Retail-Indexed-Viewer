@@ -8,6 +8,29 @@ release line.
 
 ## [Unreleased]
 
+### Added
+
+- The indexed viewport now has an explicit `source_atts_only` unmapped-polygon
+  policy for source-forensic captures. It reproduces source submission by
+  retaining AMESH ATTS and AREA ADE mappings while omitting skeleton polygons
+  absent from every source material mapping, inventories every omission in
+  renderer provenance, and never invents a material or substitutes the OpenUA
+  preview.
+
+### Changed
+
+- Incomplete ATTS coverage still fails closed by default. The source-ATTS-only
+  path is opt-in so an editor parsing or extraction error cannot silently
+  remove geometry from an ordinary exact export.
+
+### Validation
+
+- Canonical-enabled headless discovery after the source-ATTS policy change:
+  **500 tests run, 499 passed, zero failures, zero errors, and one skipped**.
+  The skip is the optional legacy `UA_RC1` corpus, which is not installed on
+  this machine. The gate includes a real-data `VP_BRGRO` framebuffer oracle
+  proving that only authored orphan polygon `root/36` is omitted.
+
 ## [3.1.0] - 2026-08-17
 
 ### Fixed
