@@ -257,7 +257,8 @@ $env:QT_QPA_PLATFORM = "offscreen"
 python -m unittest -v `
   tests.test_indexed_renderer `
   tests.test_indexed_family_adapter `
-  tests.test_indexed_viewer_integration
+  tests.test_indexed_viewer_integration `
+  tests.test_snapshot_batch_integrity
 ```
 
 The canonical test distributes no proprietary content. If local game data and
@@ -267,7 +268,8 @@ the separately extracted test assets are available, set
 Hauptstation lightning, Mnosjetz flat-TRACY propellers, and Zeppelin
 clear-TRACY propellers against frozen index-buffer hashes. It also locks one
 Hauptstation forced-row-13 diagnostic oracle without replacing the canonical
-live-framebuffer result.
+live-framebuffer result, plus an opt-in Hauptstation distance-fade oracle that
+checks the complete 1400/600 profile and interpolated vertex-brightness path.
 
 ## Scope and licensing
 

@@ -8,6 +8,8 @@ release line.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-08-17
+
 ### Added
 
 - A public 4K comparison sheet for the Hauptstation, Zeppelin, and Mnosjetz,
@@ -24,6 +26,9 @@ release line.
   formula for exact indexed output. Enabled faded PNGs are committed only after
   the raster statistics prove that complete profile, and resume metadata uses
   strict native JSON numeric types.
+- Upstream's expanded Collision Editor workspaces for collision spheres,
+  vanilla Fire Points, OpenUA/vanilla Gun Points, and opt-in Cockpit View
+  camera-offset preview, including runtime model/aspect controls.
 
 ### Changed
 
@@ -40,6 +45,33 @@ release line.
   requires the prior renderer/destination profile and, when enabled, the full
   fade profile ID, limits, distance space, and formula to match; legacy indexed
   provenance with no fade field is interpreted as fade disabled.
+- Upstream `main` through `74bea393` is merged with both parent histories
+  preserved. The fork retains its explicit **OpenUA preview** / **Retail
+  indexed (reconstructed)** selector, diagnostic TRACY controls, and strict
+  export provenance rather than adopting upstream's automatic renderer policy.
+- The shared assembly viewer now exposes the cockpit-facing winding hook and a
+  configurable near clip used by the upstream Cockpit View without changing
+  the indexed renderer's retail whole-face culling path. The fork also retains
+  `depth_renderer.py` and `projective_texture_coefficients()` for its selectable
+  OpenUA preview path.
+- The Windows packaging specification includes NumPy as an explicit hidden
+  import for indexed rendering; this is build metadata, not a claim that a new
+  binary package was produced or validated. Version 3.0.0 remains a source-only
+  fork release: the stale executable introduced on the merged upstream line is
+  absent from the v3 tree and source archive, although its historical blob
+  remains reachable in the preserved merge ancestry. No proprietary game data
+  is attached.
+
+### Fixed
+
+- Selecting a Gun Point now activates its property workspace before gizmo
+  movement, and cockpit controls refresh consistently without silently enabling
+  authored camera output.
+- Collision-editor context submenus retain their PySide wrappers for the full
+  popup lifetime instead of exposing deleted native `QMenu` objects.
+- Upstream collision-window tests now describe the current compact layout,
+  bottom-left selection overlay, Windows-safe package paths, and explicit
+  cockpit opt-in behavior.
 
 ## [2.0.0] - 2026-08-15
 
@@ -116,5 +148,6 @@ release line.
   renderer classification so it cannot be mistaken for canonical retail
   reconstruction output.
 
-[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/Stable...v2.0.0

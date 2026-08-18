@@ -14,6 +14,9 @@ Features, file layouts, commands, dependencies, workflows, and user-interface el
 
 The current repository should be treated as a development version rather than a final product specification.
 
+The latest tagged release of this fork is [OpenUAStudio Retail Indexed Viewer
+v3.0.0](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v3.0.0).
+
 ## Basic use
 
 Run from source:
@@ -25,7 +28,9 @@ python main.py
 On normal startup, OpenUAStudio first shows a tool selector for the Main
 Suite, Map Editor, Collision Editor, or Wireframe Editor.
 
-A precompiled Windows executable may also be included in the repository for convenience.
+The v3 fork release is source-only. Build or run it from source; a prebuilt
+executable inherited in upstream Git history is not present in the v3 tree or
+GitHub source archives.
 
 ### Viewer-only launch
 
@@ -37,9 +42,26 @@ python -m pip install -r requirements-viewer.txt
 python viewer_main.py [path/to/asset.base-or-SET.BAS]
 ```
 
-The complete upstream source tree is intentionally retained. Snapshot Studio
-shares its parsers and presentation code with the main suite, and preserving
-the tree also keeps the upstream GPL history and provenance clear.
+The broader editable upstream workbench is intentionally retained. Snapshot
+Studio shares parsers and presentation code with the main suite, while the
+merge commit preserves the upstream GPL history and provenance. Incompatible
+renderer-policy tests and a stale prebuilt executable were resolved out of the
+v3 tip rather than presented as current fork output.
+
+Version 3.0.0 merges upstream `main` through commit `74bea393`, including its
+expanded Collision Editor, Fire Point, Gun Point, and opt-in Cockpit View
+workspaces. Both Git parent histories are retained. Where the two development
+lines differed, this fork keeps the explicit **OpenUA preview** / **Retail
+indexed (reconstructed)** choice, the diagnostic TRACY controls, and the
+fail-closed export provenance described below. The v3.0.0 fork release is
+source-only and does not attach a separately rebuilt Windows executable.
+
+Keeping the OpenUA preview selectable also keeps the existing depth renderer
+and its `projective_texture_coefficients()` helper alongside the indexed path;
+their retention is deliberate, not an incomplete upstream merge. The
+`OpenUAStudio.spec` file declares NumPy as a hidden import for anyone building
+the application, but this source release does not claim or attach a newly
+validated compiled package.
 
 ### Reconstructed retail-indexed renderer
 
@@ -125,8 +147,9 @@ smoothing, color grading, or upscaling.
 
 See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
 fail-closed export rules, current limits, and reproducible test commands.
-The Retail Indexed Viewer release line begins at **v2.0.0**. Ongoing
-user-visible changes are maintained in [CHANGELOG.md](CHANGELOG.md).
+The Retail Indexed Viewer release line begins at **v2.0.0**; the current
+upstream-synchronized release is **v3.0.0**. Ongoing user-visible changes are
+maintained in [CHANGELOG.md](CHANGELOG.md).
 
 The mode requires a lawfully obtained local game data set containing a
 256-entry palette plus matching `REMAP/SHADERMP.ILB` (or `.ILBM`) and
@@ -149,6 +172,15 @@ when their complete palette, SHADERMP, and TRACYRMP profiles are byte-identical.
 The current profile gates cover the main inspected Urban Assault SET tables;
 an unrelated remap family that does not satisfy those structural invariants is
 reported as unsupported rather than guessed.
+
+### Upstream collaboration
+
+This is an unofficial GPL-3.0-licensed fork. The original OpenUAStudio creator
+and current upstream maintainers are welcome to reuse, adapt, cherry-pick, or
+merge this fork's changes under the repository license. They may also request
+an upstream pull request from this fork for their review. Upstream retains full
+control over whether and how any contribution is accepted; this invitation
+does not imply endorsement.
 
 For memory safety, NumPy-accelerated indexed exports are limited to 16,777,216
 pixels (a square 4096 x 4096 frame). The portable Python backend is limited to
