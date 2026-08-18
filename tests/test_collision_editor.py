@@ -743,10 +743,9 @@ class CollisionEditorTests(unittest.TestCase):
         self.assertEqual(window.type_value.text(), "None")
         self.assertIsNone(window.sphere_tree.currentItem())
 
-    def test_47_sphere_list_uses_all_available_vertical_space(self):
+    def test_47_sphere_list_uses_compact_tab_height_and_expands(self):
         window = self._window()
-        self.assertGreaterEqual(window.sphere_tree.minimumHeight(), 150)
-        self.assertLessEqual(window.sphere_tree.minimumHeight(), 160)
+        self.assertEqual(window.sphere_tree.minimumHeight(), 82)
         self.assertGreater(window.sphere_tree.maximumHeight(), 10000)
         self.assertEqual(
             window.sphere_tree.sizePolicy().verticalPolicy(),
@@ -755,16 +754,16 @@ class CollisionEditorTests(unittest.TestCase):
             window.spheres_box.sizePolicy().verticalPolicy(),
             QSizePolicy.Policy.Expanding)
 
-    def test_selected_element_panel_is_bottom_right_viewport_overlay(self):
+    def test_selected_element_panel_is_bottom_left_viewport_overlay(self):
         window = self._window()
         self.assertIs(window.selected_box.parentWidget(), window.viewport_panel)
         index = window.viewport_layout.indexOf(window.selected_box)
         self.assertGreaterEqual(index, 0)
         alignment = window.viewport_layout.itemAt(index).alignment()
         self.assertTrue(alignment & Qt.AlignmentFlag.AlignBottom)
-        self.assertTrue(alignment & Qt.AlignmentFlag.AlignRight)
+        self.assertTrue(alignment & Qt.AlignmentFlag.AlignLeft)
         self.assertFalse(alignment & Qt.AlignmentFlag.AlignTop)
-        self.assertFalse(alignment & Qt.AlignmentFlag.AlignLeft)
+        self.assertFalse(alignment & Qt.AlignmentFlag.AlignRight)
 
     def test_48_identical_spheres_keep_distinct_dense_indices(self):
         window = self._window()
@@ -819,10 +818,13 @@ class CollisionEditorTests(unittest.TestCase):
     def test_52_collision_editor_is_a_dedicated_package(self):
         import collision_editor
         from collision_editor import editor
-        self.assertTrue(collision_editor.__file__.endswith("__init__.py"))
-        self.assertTrue(editor.__file__.endswith("collision_editor/editor.py"))
-        self.assertFalse(
-            (Path(editor.__file__).parents[1] / "collision_editor.py").exists())
+        package_path = Path(collision_editor.__file__)
+        editor_path = Path(editor.__file__)
+        self.assertEqual(package_path.name, "__init__.py")
+        self.assertEqual(editor_path.name, "editor.py")
+        self.assertEqual(editor_path.parent.name, "collision_editor")
+        legacy_module = editor_path.parents[1] / "collision_editor.py"
+        self.assertNotEqual(editor_path.resolve(), legacy_module.resolve())
 
     def test_53_radius_can_be_edited_from_sphere_table(self):
         window = self._window()
@@ -1064,9 +1066,11 @@ class CollisionEditorTests(unittest.TestCase):
             "Change to Weapon Collision",
         ])
         context = window._create_sphere_context_menu(0)
+        # The popup keeps explicit Python references to its submenus so PySide
+        # cannot dispose their native QMenu objects after the helper returns.
+        self.assertEqual(len(context._owned_submenus), 3)
         submenus = {
-            action.text(): action.menu() for action in context.actions()
-            if action.menu() is not None
+            submenu.title(): submenu for submenu in context._owned_submenus
         }
         self.assertIn("Change Sphere Type", submenus)
         self.assertIn("Mirror Selected Sphere", submenus)

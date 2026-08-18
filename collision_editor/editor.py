@@ -5004,6 +5004,15 @@ class CollisionEditorWindow(QMainWindow):
         menu.addAction(self.open_sklt_action)
         preset_menu = menu.addMenu("View Preset")
         self._populate_view_preset_context_menu(preset_menu)
+        # PySide can release the Python wrappers returned by addMenu() after
+        # this helper returns even though QAction still references the native
+        # submenus.  Keep the wrappers alive with the parent context menu so
+        # the submenus remain usable for the lifetime of the popup.
+        menu._owned_submenus = (
+            change_type_menu,
+            mirror_menu,
+            preset_menu,
+        )
         return menu
 
     def _populate_view_preset_context_menu(self, menu: QMenu) -> None:
