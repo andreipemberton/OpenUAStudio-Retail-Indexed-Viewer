@@ -3562,6 +3562,15 @@ class AssetViewport(QWidget):
 
     # -- painting ------------------------------------------------------------------
 
+    def _front_facing_from_screen_area(self, area: float) -> bool:
+        """Return the regular editor front-face convention for screen area.
+
+        Runtime-specific workspaces may override this without changing the
+        shared Model Editor / Snapshot rendering contract.
+        """
+
+        return float(area) >= 0.0
+
     def paintGL_stub(self):  # pragma: no cover - kept for API parity
         pass
 
@@ -3872,7 +3881,7 @@ class AssetViewport(QWidget):
                         - triangle[(item + 1) % 3].x()
                         * triangle[item].y()
                         for item in range(3))
-                    if area >= 0.0:
+                    if self._front_facing_from_screen_area(area):
                         front_facing = True
                         break
                 draw_piece(
@@ -3928,12 +3937,16 @@ class AssetViewport(QWidget):
                 for index in range(2, len(cam)):
                     indices = (0, index, index - 1)
                     tri_camera = tuple(cam[item] for item in indices)
-                    clipped = clip_camera_polygon_near(CameraPolygon(
-                        tri_camera,
-                        tuple(tuple(face_uvs[item]) for item in indices),
-                        None,
-                        source_order,
-                    ))
+                    clipped = clip_camera_polygon_near(
+                        CameraPolygon(
+                            tri_camera,
+                            tuple(tuple(face_uvs[item]) for item in indices),
+                            None,
+                            source_order,
+                        ),
+                        minimum_distance=float(
+                            camera.get("near_distance", 0.2)),
+                    )
                     if clipped is None:
                         continue
                     clipped_attributes = clipped.attributes
@@ -3966,7 +3979,7 @@ class AssetViewport(QWidget):
                     front_facing = (
                         indexed_face_front_facing
                         if indexed_face_front_facing is not None
-                        else area >= 0.0)
+                        else self._front_facing_from_screen_area(area))
                     if (mode != "textured_indexed"
                             and self._backface_cull and not front_facing):
                         continue
