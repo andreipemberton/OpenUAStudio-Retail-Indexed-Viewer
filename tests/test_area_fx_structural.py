@@ -4,12 +4,14 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
+from anm_parser import parse_anm_bytes
 from assembly_window import AssemblyWindow
 from asset_family import AssetFamily, FamilyObject, rebuild_materials
 from base_mapping_editor import MappingIndex
@@ -27,6 +29,7 @@ from geometry_editor import (
     build_geometry_clipboard,
     plan_delete_geometry,
 )
+from ilbm_parser import IlbmImage
 from polygon_reference_graph import (
     build_polygon_reference_graph,
     diagnose_polygon_references,
@@ -121,6 +124,38 @@ def _area_base_bytes():
     )
 
 
+def _model_animation_bytes():
+    """Build the resolved MODEL.ANM dependency used by the export fixture."""
+
+    bitmap_class = b"ilbm.class\0"
+    bitmap_names = b"MODEL.ILBM\0MODEL.ILBM\0"
+    groups = [list(UVS), list(reversed(UVS))]
+    stream = (
+        struct.pack(">h", len(bitmap_class)) + bitmap_class
+        + struct.pack(">h", len(bitmap_names)) + bitmap_names
+        + struct.pack(">h", sum(len(group) + 1 for group in groups))
+        + b"".join(
+            struct.pack(">h", len(group))
+            + bytes(value for uv in group for value in uv)
+            for group in groups)
+        + struct.pack(">h", 2)
+        + struct.pack(">ihh", 128, 0, 0)
+        + struct.pack(">ihh", 256, 1, 1)
+    )
+    return _form(b"VANM", _chunk(b"DATA", stream))
+
+
+def _texture(name):
+    return IlbmImage(
+        source_name=name,
+        kind="VBMP",
+        width=2,
+        height=2,
+        palette=[(160, 140, 100)] + [(0, 0, 0)] * 255,
+        pixels=bytes([0, 0, 0, 0]),
+    )
+
+
 def _topology():
     points = []
     polygons = []
@@ -174,6 +209,12 @@ def _family(root):
         base_path=base_path,
         base_asset=base_asset,
         root_object=obj,
+        animations={
+            "MODEL.ANM": parse_anm_bytes(
+                _model_animation_bytes(), "MODEL.ANM")},
+        textures={
+            name: _texture(name)
+            for name in ("MODEL.ILBM", "STONE.ILBM", "FX2.ILBM")},
     )
     rebuild_materials(obj, family)
     return family, obj, original_base
@@ -363,6 +404,33 @@ class AreaFxStructuralTests(unittest.TestCase):
                     skeleton=saved_model,
                     owner_path="root")
                 self.assertEqual(diagnose_polygon_references(reloaded), [])
+                self.assertEqual(family.base_asset.tree.data, original_base)
+                self.assertEqual(family.base_path.read_bytes(), original_base)
+            finally:
+                window.close()
+
+    def test_area_export_refuses_unresolved_animation_dependency(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            family, obj, original_base = _family(root)
+            del family.animations["MODEL.ANM"]
+            target_sklt = root / "out" / "FXTEST.SKLT"
+            target_base = root / "out" / "FXTEST.BASE"
+            window = AssemblyWindow()
+            try:
+                window._family = family
+                window._owner_to_obj = {"root": obj}
+                window._selected_owner = "root"
+                with patch.object(
+                        QMessageBox, "critical") as critical:
+                    self.assertFalse(window._write_model_files(
+                        "root", family, obj, target_sklt, target_base,
+                        ask_replace=False))
+                self.assertIn(
+                    "Animation dependency MODEL.ANM is unresolved",
+                    critical.call_args.args[2])
+                self.assertFalse(target_sklt.exists())
+                self.assertFalse(target_base.exists())
                 self.assertEqual(family.base_asset.tree.data, original_base)
                 self.assertEqual(family.base_path.read_bytes(), original_base)
             finally:

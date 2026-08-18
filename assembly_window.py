@@ -803,6 +803,15 @@ class AssemblyWindow(QMainWindow):
         self._setbas_context_item = item
         resources = self._setbas_selected_resources()
         kind = item.data(0, _BAS_KIND_ROLE) if item is not None else None
+        if kind in ("base", "sklt.class", "ilbm.class", "bmpanim.class"):
+            # Preview the row under the pointer, not the current/selected row.
+            # This preserves multi-selection and avoids a right click silently
+            # changing which BAS resource the keyboard will act on next.
+            preview = menu.addAction("Preview")
+            preview.triggered.connect(
+                lambda _checked=False, target=item:
+                self._preview_setbas_resource(target))
+            menu.addSeparator()
         extract = menu.addAction(
             f"Extract selected... ({len(resources)})" if len(resources) > 1
             else "Extract selected...")
@@ -3357,7 +3366,7 @@ class AssemblyWindow(QMainWindow):
         resource = self._setbas.resources[index]
         class_id = resource.class_id.lower()
         if class_id == "sklt.class":
-            self._preview_setbas_skeleton()
+            self._preview_setbas_skeleton(resource)
             return
         if class_id == "ilbm.class":
             self._preview_setbas_texture(resource)
@@ -3516,18 +3525,19 @@ class AssemblyWindow(QMainWindow):
             image, f"Palette: {palette_source}")
 
     def _preview_setbas_skeleton(
-            self, *, confirm_discard: bool = True) -> None:
+            self, resource=None, *, confirm_discard: bool = True) -> None:
         if self._setbas is None:
             return
-        item = self.setbas_tree.currentItem()
-        index = item.data(0, Qt.ItemDataRole.UserRole) if item else None
-        if index is None:
-            QMessageBox.information(
-                self, "No resource selected",
-                "Select a sklt.class resource in the SET.BAS tree first.",
-            )
-            return
-        resource = self._setbas.resources[index]
+        if resource is None:
+            item = self.setbas_tree.currentItem()
+            index = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+            if index is None:
+                QMessageBox.information(
+                    self, "No resource selected",
+                    "Select a sklt.class resource in the SET.BAS tree first.",
+                )
+                return
+            resource = self._setbas.resources[index]
         if resource.class_id.lower() != "sklt.class":
             QMessageBox.information(
                 self, "Not a skeleton",
@@ -9674,7 +9684,16 @@ class AssemblyWindow(QMainWindow):
             del self._uv_original[key]
         for key in [key for key in self._texture_original if key[0] == owner]:
             del self._texture_original[key]
-        for key in [key for key in self._vanm_uv_original if key[0] == owner]:
+        # VANM baselines are keyed by (animation_name, group_index), unlike
+        # model and texture baselines which begin with an object owner.  Clear
+        # only animations that this verified family export actually wrote;
+        # unrelated animations can still contain unsaved edits.
+        exported_animation_names = {
+            canonical.casefold()
+            for canonical, _animation, _relative in animation_exports}
+        for key in [
+                key for key in self._vanm_uv_original
+                if key[0].casefold() in exported_animation_names]:
             del self._vanm_uv_original[key]
         self._pending_repairs = []
         self._repair_plan = None

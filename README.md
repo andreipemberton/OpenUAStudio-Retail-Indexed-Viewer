@@ -15,7 +15,7 @@ Features, file layouts, commands, dependencies, workflows, and user-interface el
 The current repository should be treated as a development version rather than a final product specification.
 
 The latest tagged release of this fork is [OpenUAStudio Retail Indexed Viewer
-v3.0.0](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v3.0.0).
+v3.1.0](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v3.1.0).
 
 ## Basic use
 
@@ -25,8 +25,8 @@ Run from source:
 python main.py
 ```
 
-On normal startup, OpenUAStudio first shows a tool selector for the Main
-Suite, Map Editor, Collision Editor, or Wireframe Editor.
+On normal startup, OpenUAStudio first shows a tool selector for the Model
+Editor, Snapshot Studio, Map Editor, Collision Editor, or Wireframe Editor.
 
 The v3 fork release is source-only. Build or run it from source; a prebuilt
 executable inherited in upstream Git history is not present in the v3 tree or
@@ -62,6 +62,13 @@ their retention is deliberate, not an incomplete upstream merge. The
 `OpenUAStudio.spec` file declares NumPy as a hidden import for anyone building
 the application, but this source release does not claim or attach a newly
 validated compiled package.
+
+Version 3.1.0 is a maintenance release over that reconciliation. It fixes the
+VANM UV saved-state bookkeeping after a verified family export, restores
+selection-preserving SET.BAS context-menu previews, and updates the associated
+UI/export contracts without weakening unresolved-dependency protection. Its
+canonical-enabled headless suite runs 497 tests with 496 passes, no failures or
+errors, and one skipped optional `UA_RC1` corpus test.
 
 ### Reconstructed retail-indexed renderer
 
@@ -148,7 +155,7 @@ smoothing, color grading, or upscaling.
 See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
 fail-closed export rules, current limits, and reproducible test commands.
 The Retail Indexed Viewer release line begins at **v2.0.0**; the current
-upstream-synchronized release is **v3.0.0**. Ongoing user-visible changes are
+upstream-synchronized release is **v3.1.0**. Ongoing user-visible changes are
 maintained in [CHANGELOG.md](CHANGELOG.md).
 
 The mode requires a lawfully obtained local game data set containing a

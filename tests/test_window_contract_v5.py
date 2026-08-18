@@ -403,10 +403,14 @@ class WindowContractV5Tests(unittest.TestCase):
             window._family = family
             window._selected_owner = "root"
             window._owner_to_obj = {"root": obj}
-            window.viewport.edit_owner = None
-            window.viewport.paste_preview_active = False
+            self.assertIsNone(window.viewport.edit_owner)
+            self.assertFalse(window.viewport.paste_preview_active)
 
-            with patch.object(window, "can_export_sklt", return_value=True):
+            with patch.object(
+                    window, "can_export_sklt", return_value=True), \
+                    patch.object(
+                        window, "_standalone_sklt_source",
+                        return_value=ref.path):
                 window._sync_geometry_save_controls()
 
             self.assertTrue(window.save_sklt_action.isEnabled())
@@ -664,15 +668,22 @@ class WindowContractV5Tests(unittest.TestCase):
                     window.setbas_tree, "itemAt", return_value=second), \
                     patch.object(
                         assembly_window_module, "QMenu",
-                        return_value=fake_menu):
+                        return_value=fake_menu), \
+                    patch.object(
+                        window, "_preview_setbas_texture") as preview:
                 window._show_setbas_context_menu(QPoint())
-            self.assertIs(window.setbas_tree.currentItem(), first)
-            labels = [
-                action.text() for action in fake_menu.actions()
-                if not action.isSeparator()]
-            self.assertNotIn("Expand group", labels)
-            self.assertNotIn("Collapse group", labels)
-            self.assertIn("Preview", labels)
+                action = next(
+                    candidate for candidate in fake_menu.actions()
+                    if candidate.text() == "Preview")
+                action.triggered.callback()
+                preview.assert_called_once_with(resources[1])
+                self.assertIs(window.setbas_tree.currentItem(), first)
+                labels = [
+                    candidate.text() for candidate in fake_menu.actions()
+                    if not candidate.isSeparator()]
+                self.assertNotIn("Expand group", labels)
+                self.assertNotIn("Collapse group", labels)
+                self.assertIn("Preview", labels)
         finally:
             window.close()
 

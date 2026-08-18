@@ -8,6 +8,34 @@ release line.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-08-17
+
+### Fixed
+
+- Verified asset-family exports now clear saved VANM UV dirty baselines by the
+  actual `(animation_name, group_index)` key after the corresponding animation
+  is successfully written and reparsed. Baselines for unrelated, non-exported
+  animations remain dirty instead of being discarded.
+- Supported SET.BAS resource rows now expose **Preview** in their context menu.
+  The command previews the row under the pointer without changing the current
+  tree selection, including explicit embedded-skeleton routing.
+- AREA structural export coverage now supplies a complete animation and texture
+  dependency graph for its successful save/reload case, while a separate test
+  proves that a missing `MODEL.ANM` still fails closed, writes no partial
+  output, and leaves source bytes unchanged.
+- Startup-selector tests now exercise the fixed, non-scrolling tool-card panel
+  through its current API and real Qt input events. Snapshot Studio tests now
+  verify its intentional width-aware scroll wrapper, and standalone-SKLT tests
+  respect the viewport's read-only edit-state properties.
+
+### Validation
+
+- Full canonical-enabled headless discovery: **497 tests run, 496 passed, zero
+  failures, zero errors, and one skipped**. The skip is the optional legacy
+  `UA_RC1` corpus, which is not installed on this machine.
+- The focused export, AREA, window-contract, startup-selector, and Snapshot
+  Studio maintenance gate passes **76/76** tests.
+
 ## [3.0.0] - 2026-08-17
 
 ### Added
@@ -148,6 +176,7 @@ release line.
   renderer classification so it cannot be mistaken for canonical retail
   reconstruction output.
 
-[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/Stable...v2.0.0

@@ -3,7 +3,10 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QCheckBox, QTabWidget
+
+from editor_widgets import ViewportWidthScrollArea
 
 from snapshot_studio import SnapshotStudioWindow
 
@@ -22,7 +25,20 @@ class SnapshotStudioTests(unittest.TestCase):
             ]
             self.assertEqual(labels, ["Snapshot", "BAS Manager"])
             self.assertIs(
-                window._right_tabs.widget(0), window._snapshot_panel)
+                window._right_tabs.widget(0), window._snapshot_scroll)
+            self.assertIsInstance(
+                window._snapshot_scroll, ViewportWidthScrollArea)
+            self.assertIs(
+                window._snapshot_scroll.widget(), window._snapshot_panel)
+            self.assertTrue(window._snapshot_scroll.widgetResizable())
+            self.assertEqual(
+                window._snapshot_scroll.horizontalScrollBarPolicy(),
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff,
+            )
+            self.assertEqual(
+                window._snapshot_scroll.verticalScrollBarPolicy(),
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded,
+            )
             self.assertIs(window._right_tabs.widget(1), window._bas_panel)
             self.assertFalse(
                 isinstance(window._right_tabs.widget(0), QTabWidget))

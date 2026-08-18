@@ -1116,6 +1116,9 @@ class FxClipboardV3Tests(unittest.TestCase):
                     list(group) for group in
                     family.animations["GLOW.ANM"].texcoord_groups]
                 self.assertNotEqual(edited[0], UVS)
+                unrelated_baseline = [list(UVS)]
+                window._vanm_uv_original[(
+                    "UNRELATED.ANM", 0)] = unrelated_baseline
 
                 output = root / "bundle"
                 self.assertTrue(window._write_model_files(
@@ -1131,7 +1134,11 @@ class FxClipboardV3Tests(unittest.TestCase):
                 self.assertEqual(
                     export_anm_bytes(family.animations["GLOW.ANM"]),
                     target.read_bytes())
-                self.assertFalse(window._vanm_uv_original)
+                # Saving this family clears GLOW.ANM's dirty baseline, but an
+                # animation outside the exported dependency graph stays dirty.
+                self.assertEqual(
+                    window._vanm_uv_original,
+                    {("UNRELATED.ANM", 0): unrelated_baseline})
             finally:
                 window.close()
 
