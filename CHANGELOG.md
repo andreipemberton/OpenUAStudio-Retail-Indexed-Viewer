@@ -8,6 +8,8 @@ release line.
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-08-18
+
 ### Added
 
 - An opt-in **PSX prototype visualization (experimental)** viewer and Photo
@@ -19,6 +21,11 @@ release line.
   ID/version, PC/OpenUA source-asset pipeline, applied raster policies, and
   explicit status for native resolution, fog, BGR555/STP, dithering, vertex
   snapping, and primitive queues that remain unvalidated and unapplied.
+- A matched Hauptstation comparison sheet generated from the release
+  implementation with identical cameras, animation states, output dimensions,
+  and presentation background. The bounded public package records its source
+  hash, exact profile identity, measurements, and SHA-256 without publishing
+  local paths or raw game assets.
 
 ### Changed
 
@@ -37,6 +44,10 @@ release line.
 - The focused PSX profile, UI, Snapshot Studio, batch-integrity, OpenUA
   projective, Retail Indexed integration/canonical, and depth-renderer gate
   passes 118/118 tests; all 95 tracked/candidate Python files compile.
+- The bounded comparison package contains four files totaling 2,034,037 bytes.
+  All three non-self files match `SHA256SUMS.txt`; the 3072 x 1678 PNG contains
+  only `IHDR`, `IDAT`, and `IEND` chunks and carries no embedded local-path or
+  text metadata.
 
 ## [4.0.0] - 2026-08-18
 
@@ -246,7 +257,8 @@ release line.
   renderer classification so it cannot be mistaken for canonical retail
   reconstruction output.
 
-[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v4.0.0...HEAD
+[Unreleased]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v5.0.0...HEAD
+[5.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.1.0...v4.0.0
 [3.1.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v3.0.0...v3.1.0
 [3.0.0]: https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/compare/v2.0.0...v3.0.0

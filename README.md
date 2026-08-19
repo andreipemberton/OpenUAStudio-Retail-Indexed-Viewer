@@ -15,7 +15,7 @@ Features, file layouts, commands, dependencies, workflows, and user-interface el
 The current repository should be treated as a development version rather than a final product specification.
 
 The latest tagged release of this fork is [OpenUAStudio Retail Indexed Viewer
-v4.0.0](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v4.0.0).
+v5.0.0](https://github.com/andreipemberton/OpenUAStudio-Retail-Indexed-Viewer/releases/tag/v5.0.0).
 
 ## Basic use
 
@@ -126,6 +126,26 @@ See [PSX_PROTOTYPE_PROFILE.md](PSX_PROTOTYPE_PROFILE.md) for the exact v1
 contract, non-claims, batch-provenance rules, and the evidence-backed boundary
 for a later read-only PW3/`UNIT.BIN` asset browser.
 
+Version 5.0.0 introduces this profile as a third, opt-in renderer without
+changing the default OpenUA preview or the Retail Indexed canonical path. A
+[matched visual comparison](docs/psx-prototype-profile-v5/README.md) shows the
+normal OpenUA preview beside the fixed PSX visual-v1 contract on Hauptstation
+using identical camera and animation state. It is a comparison of presentation
+policies applied to PC/OpenUA assets, not a PlayStation prototype capture or a
+claim of native PSX asset rendering.
+
+#### Matched profile comparison
+
+[![Normal OpenUA rendering and the experimental PSX visualization profile applied to the same PC/OpenUA Hauptstation asset](docs/psx-prototype-profile-v5/hauptstation-openua-vs-psx-profile.png)](docs/psx-prototype-profile-v5/hauptstation-openua-vs-psx-profile.png)
+
+Both panels use the same loaded PC/OpenUA `VP_TAERO` asset family, camera,
+animation state, and 1536 x 1536 output size. The right panel applies the
+experimental `psx_prototype_visual_v1` affine/nearest/hard-edge policy; it is
+not a native PlayStation asset decode, gameplay capture, emulator result, or
+cycle-accurate reconstruction. See the
+[bounded media record](docs/psx-prototype-profile-v5/README.md) for provenance,
+checksums, and the publication boundary.
+
 Snapshot Studio also exposes a **Flat/LUM-TRACY** destination selector. Its
 default **Live framebuffer - retail** setting preserves the source-traced frame
 clear at palette index zero and reads the actual destination beneath every
@@ -195,7 +215,7 @@ smoothing, color grading, or upscaling.
 See [RETAIL_INDEXED_RENDERER.md](RETAIL_INDEXED_RENDERER.md) for the pipeline,
 fail-closed export rules, current limits, and reproducible test commands.
 The Retail Indexed Viewer release line begins at **v2.0.0**; the current
-release is **v4.0.0**. Ongoing user-visible changes are
+release is **v5.0.0**. Ongoing user-visible changes are
 maintained in [CHANGELOG.md](CHANGELOG.md).
 
 The mode requires a lawfully obtained local game data set containing a
@@ -306,6 +326,19 @@ The captures are not image-generated or upscaled, but the depicted Urban
 Assault models, textures, names, and designs remain third-party visual content.
 They are not OpenUAStudio source code and are not relicensed under the GPL. The
 media catalog contains the more specific capture, provenance, and rights notice.
+
+### PSX-profile comparison capture
+
+Version 5 includes one annotated matched-renderer comparison for the
+experimental PSX prototype visualization profile. It is rendered from the same
+PC/OpenUA asset family in both panels and does not contain native PlayStation
+assets or claim to reproduce PlayStation gameplay.
+
+The image is technical visual documentation rather than raw or extractable
+game data. The depicted Urban Assault model, textures, name, and design remain
+third-party visual content and are not relicensed under the GNU GPL. The
+[bounded media directory](docs/psx-prototype-profile-v5/README.md) records the
+exact capture provenance, publication scope, and checksums.
 
 ## Safety and data handling
 

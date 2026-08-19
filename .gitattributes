@@ -4,3 +4,9 @@ docs/retail-indexed-turntables-v4/manifest.json text eol=lf
 docs/retail-indexed-turntables-v4/SHA256SUMS.txt text eol=lf
 docs/retail-indexed-turntables-v4/index.png binary
 docs/retail-indexed-turntables-v4/gifs/** binary
+
+# Keep the published v5 PSX-profile comparison package byte-stable too.
+docs/psx-prototype-profile-v5/README.md text eol=lf
+docs/psx-prototype-profile-v5/manifest.json text eol=lf
+docs/psx-prototype-profile-v5/SHA256SUMS.txt text eol=lf
+docs/psx-prototype-profile-v5/hauptstation-openua-vs-psx-profile.png binary

@@ -1,0 +1,80 @@
+{
+  "schema": "openua_psx_prototype_profile_visual_v1_public_qa",
+  "release": "v5.0.0",
+  "profile": {
+    "requested_mode": "textured_psx_prototype",
+    "effective_mode": "psx_prototype_visual_v1",
+    "profile_id": "psx_prototype_visual_v1",
+    "profile_version": 1,
+    "source_asset_pipeline": "pc_openua_asset_family",
+    "native_psx_asset_decode": false,
+    "cycle_accurate": false,
+    "texture_interpolation": "affine",
+    "texture_filter": "nearest",
+    "polygon_antialiasing": false,
+    "native_resolution": "unvalidated_not_applied",
+    "fog_draw_distance": "unvalidated_not_applied",
+    "psx_color_semantics": "unvalidated_not_applied",
+    "psx_dithering": "unvalidated_not_applied",
+    "psx_vertex_snapping": "unvalidated_not_applied",
+    "psx_primitive_queues": "unvalidated_not_applied",
+    "scope": "platform-informed presentation of the loaded PC/OpenUA asset; does not decode PSX UNIT.BIN, PW3, GFX, DAT/IND, or prototype animation data"
+  },
+  "renderer_implementation": {
+    "commit": "eec4f1a4fb6832b0c9612632b052c6d6e06e30b1",
+    "tree": "7046abc6ab021f49a47a950cbbd333a32ebba295",
+    "assembly_viewer_sha256": "89c8900e439a1bb9edf67b05ef190da14500f8bb0c6192a7c76a0d390dbd55ee",
+    "clean_before_render": true,
+    "clean_after_render": true
+  },
+  "capture": {
+    "source_size": [1536, 1536],
+    "view": "Isometric Front Right",
+    "yaw_degrees": -45.0,
+    "pitch_degrees": 35.264,
+    "zoom_percent": 92,
+    "background_rgba": [24, 26, 32, 255],
+    "comparison_rule": "same loaded AssetFamily, camera, animation time, target size, and background; only renderer mode changes"
+  },
+  "assets": [
+    {
+      "code": "VP_TAERO",
+      "name": "Hauptstation",
+      "base_sha256": "a1a436c789aa21448e7c35902b6fc9a87295890c45bd8875c58d49b6749dbd91",
+      "animation_time_ms": 312.5,
+      "camera_exact_match": true,
+      "animation_state_exact_match": true,
+      "alpha_exact_match": true,
+      "fallback_used": false,
+      "fallback_reason": "",
+      "changed_rgb_pixels": 745554,
+      "changed_rgb_percent_total": 31.600698,
+      "changed_rgb_percent_model_union": 96.687196,
+      "openua_capture_sha256": "258747db7396b89b7377e9cddff42f9c41d333013968bf8a5e7e12d1316ffb60",
+      "psx_visual_v1_capture_sha256": "4ec7e059fd639e2a622c9cad872ca10477282b83415e52808cd4d1a75769afd7",
+      "openua_unique_rgb_colors": 159485,
+      "psx_visual_v1_unique_rgb_colors": 160
+    }
+  ],
+  "public_artifact": {
+    "path": "hauptstation-openua-vs-psx-profile.png",
+    "width": 3072,
+    "height": 1678,
+    "bytes": 2027463,
+    "sha256": "d8addebef29b15f8f121a76fa991bc3b3d2f921864698f95fc1584e929cffcdc"
+  },
+  "private_qa_manifest_sha256": "295c1e2df61134a1d342a6605abb73a484ad46342130f85dc4f85919247a4e7b",
+  "artifact_boundary": {
+    "published_comparison_count": 1,
+    "derived_documentation_only": true,
+    "raw_game_assets_included": false,
+    "private_local_paths_included": false,
+    "source_capture_pngs_included": false,
+    "difference_heatmaps_included": false,
+    "multi_asset_internal_qa_sheet_included": false,
+    "local_path_bearing_qa_manifest_included": false,
+    "generative_imagery_used": false,
+    "upscaling_used": false,
+    "panel_resizing_used": false
+  }
+}

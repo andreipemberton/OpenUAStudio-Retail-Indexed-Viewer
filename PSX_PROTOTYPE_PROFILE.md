@@ -60,6 +60,20 @@ policy. `Skip existing` accepts a prior PSX batch only when its profile ID,
 version, and output-affecting policy record match. A later improved profile
 therefore cannot silently reuse v1 output.
 
+## Matched visual comparison
+
+The v5.0.0 documentation includes a
+[matched Hauptstation comparison](docs/psx-prototype-profile-v5/README.md).
+The pair uses the same loaded asset family, camera, animation state, output
+size, and background. Only the renderer mode changes between the normal OpenUA
+preview and `psx_prototype_visual_v1`.
+
+The sheet is composed from two direct 1536 x 1536 viewer renders. It was not
+AI-generated, upscaled, smoothed, or color-graded. The public package preserves
+the comparison PNG, a repository-relative provenance manifest, and exact
+SHA-256 checksums; it excludes the raw game assets and private local paths used
+by the validation environment.
+
 ## Evidence-backed next phase
 
 The prototype audit established enough structure for a later, separate,
