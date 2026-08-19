@@ -83,6 +83,7 @@ from asset_tree_filter import filter_tree as filter_asset_tree
 from assembly_viewer import (
     AssetViewport,
     FLAT_TRACY_DESTINATION_MODES,
+    PSX_PROTOTYPE_VIEW_MODE,
     TEXTURED_VIEW_MODES,
     VIEW_MODES,
     VIEW_PRESETS,
@@ -175,6 +176,14 @@ from vp_manager import (
 )
 
 WINDOW_TITLE = "OpenUAStudio"
+PSX_PROTOTYPE_VIEW_LABEL = (
+    "Textured — PSX prototype visualization (experimental)")
+PSX_PROTOTYPE_SNAPSHOT_LABEL = (
+    "PSX prototype visualization (experimental)")
+PSX_PROTOTYPE_NOTICE = (
+    "Experimental PSX prototype visualization applied to the currently "
+    "loaded PC/OpenUA assets. It does not load PlayStation UNIT.BIN/PW3 "
+    "data and is not cycle-accurate PSX emulation.")
 _BAS_KIND_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _BAS_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 
@@ -1248,8 +1257,16 @@ class AssemblyWindow(QMainWindow):
                      "materials": "Material groups",
                      "textured": "Textured — OpenUA preview",
                      "textured_indexed":
-                         "Textured — Retail indexed (reconstructed)"}[mode]
+                         "Textured — Retail indexed (reconstructed)",
+                     PSX_PROTOTYPE_VIEW_MODE:
+                         PSX_PROTOTYPE_VIEW_LABEL}[mode]
             self.mode_combo.addItem(label, mode)
+            if mode == PSX_PROTOTYPE_VIEW_MODE:
+                self.mode_combo.setItemData(
+                    self.mode_combo.count() - 1,
+                    PSX_PROTOTYPE_NOTICE,
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         self.mode_combo.setCurrentIndex(
             self.mode_combo.findData("textured"))
         self.mode_combo.currentIndexChanged.connect(
@@ -1280,7 +1297,7 @@ class AssemblyWindow(QMainWindow):
         self.play_button.setToolTip(
             "Continuously play resolved VANM texture and effect frames. "
             "Uncheck to freeze the current frame; Reset Frame returns to "
-            "frame 1. Applies to both renderers. Complete-model batch "
+            "frame 1. Applies to all renderer modes. Complete-model batch "
             "exports remain deterministic at the reset frame.")
         self.play_button.toggled.connect(self._toggle_play)
         anim_bar.addWidget(self.play_button)
@@ -1760,9 +1777,23 @@ class AssemblyWindow(QMainWindow):
             "OpenUA preview", "textured")
         self.snapshot_renderer_combo.addItem(
             "Retail indexed (reconstructed)", "textured_indexed")
+        self.snapshot_renderer_combo.addItem(
+            PSX_PROTOTYPE_SNAPSHOT_LABEL, PSX_PROTOTYPE_VIEW_MODE)
+        self.snapshot_renderer_combo.setItemData(
+            self.snapshot_renderer_combo.count() - 1,
+            PSX_PROTOTYPE_NOTICE,
+            Qt.ItemDataRole.ToolTipRole,
+        )
         self.snapshot_renderer_combo.currentIndexChanged.connect(
             self._on_snapshot_renderer_changed)
         view_layout.addWidget(self.snapshot_renderer_combo, 1, 1)
+        self.snapshot_renderer_notice = QLabel(PSX_PROTOTYPE_NOTICE)
+        self.snapshot_renderer_notice.setWordWrap(True)
+        self.snapshot_renderer_notice.setToolTip(PSX_PROTOTYPE_NOTICE)
+        self.snapshot_renderer_notice.setStyleSheet(
+            "color: #d6b66b; padding: 2px 0;")
+        self.snapshot_renderer_notice.setVisible(False)
+        view_layout.addWidget(self.snapshot_renderer_notice, 2, 0, 1, 2)
         self.snapshot_distance_fade_check = QCheckBox(
             "AREA distance fade (1400/600)")
         self.snapshot_distance_fade_check.setChecked(False)
@@ -1776,15 +1807,15 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_distance_fade_check.toggled.connect(
             self._on_retail_area_distance_fade_toggled)
         view_layout.addWidget(
-            self.snapshot_distance_fade_check, 2, 0, 1, 2)
-        view_layout.addWidget(QLabel("Zoom:"), 3, 0)
+            self.snapshot_distance_fade_check, 3, 0, 1, 2)
+        view_layout.addWidget(QLabel("Zoom:"), 4, 0)
         self.snapshot_zoom_spin = QSpinBox()
         self.snapshot_zoom_spin.setRange(25, 300)
         self.snapshot_zoom_spin.setSuffix("%")
         self.snapshot_zoom_spin.setValue(100)
         self.snapshot_zoom_spin.valueChanged.connect(
             self._on_snapshot_zoom_changed)
-        view_layout.addWidget(self.snapshot_zoom_spin, 3, 1)
+        view_layout.addWidget(self.snapshot_zoom_spin, 4, 1)
         self.snapshot_zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.snapshot_zoom_slider.setRange(25, 300)
         self.snapshot_zoom_slider.setValue(100)
@@ -1792,13 +1823,13 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_zoom_slider.setPageStep(10)
         self.snapshot_zoom_slider.valueChanged.connect(
             self._on_snapshot_zoom_changed)
-        view_layout.addWidget(self.snapshot_zoom_slider, 4, 0, 1, 2)
+        view_layout.addWidget(self.snapshot_zoom_slider, 5, 0, 1, 2)
         self.snapshot_guides_button = QPushButton("Show Guides and Overlays")
         self.snapshot_guides_button.setCheckable(True)
         self.snapshot_guides_button.setChecked(False)
         self.snapshot_guides_button.toggled.connect(
             self._on_snapshot_guides_toggled)
-        view_layout.addWidget(self.snapshot_guides_button, 5, 0, 1, 2)
+        view_layout.addWidget(self.snapshot_guides_button, 6, 0, 1, 2)
         studio_layout.addWidget(view_box)
 
         background_box = QGroupBox("Background")
@@ -1859,6 +1890,7 @@ class AssemblyWindow(QMainWindow):
             self.snapshot_tracy_destination_swatch, 2, 2)
         self._update_flat_tracy_destination_controls()
         self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
         studio_layout.addWidget(background_box)
 
         output_box = QGroupBox("Output size")
@@ -4175,6 +4207,7 @@ class AssemblyWindow(QMainWindow):
                 self.snapshot_renderer_combo.blockSignals(False)
         self._update_flat_tracy_destination_controls()
         self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
         if mode != "textured_indexed":
             self._notify(
                 f"Viewport mode changed to {self.mode_combo.currentText()}.",
@@ -4194,6 +4227,7 @@ class AssemblyWindow(QMainWindow):
             self.mode_combo.blockSignals(False)
         self._update_flat_tracy_destination_controls()
         self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
         if mode != "textured_indexed":
             self._notify(
                 f"Snapshot renderer changed to "
@@ -4232,6 +4266,24 @@ class AssemblyWindow(QMainWindow):
             checkbox.blockSignals(True)
             checkbox.setChecked(configured)
             checkbox.blockSignals(False)
+
+    def _update_psx_prototype_renderer_notice(self) -> None:
+        """Expose the PSX profile's presentation-only provenance in the UI."""
+
+        renderer = getattr(self, "snapshot_renderer_combo", None)
+        notice = getattr(self, "snapshot_renderer_notice", None)
+        snapshot_psx = bool(
+            renderer is not None
+            and renderer.currentData() == PSX_PROTOTYPE_VIEW_MODE)
+        if notice is not None:
+            notice.setVisible(snapshot_psx)
+        if renderer is not None:
+            renderer.setToolTip(PSX_PROTOTYPE_NOTICE if snapshot_psx else "")
+
+        toolbar = getattr(self, "mode_combo", None)
+        if toolbar is not None:
+            toolbar_psx = toolbar.currentData() == PSX_PROTOTYPE_VIEW_MODE
+            toolbar.setToolTip(PSX_PROTOTYPE_NOTICE if toolbar_psx else "")
 
     def _update_flat_tracy_destination_controls(self) -> None:
         combo = getattr(self, "snapshot_tracy_destination_combo", None)
@@ -4500,6 +4552,7 @@ class AssemblyWindow(QMainWindow):
                 action.setEnabled(False)
             self._update_flat_tracy_destination_controls()
             self._update_retail_area_distance_fade_control()
+            self._update_psx_prototype_renderer_notice()
             self._on_snapshot_preset_changed(
                 self.snapshot_view_combo.currentText())
         elif not entering and self._snapshot_mode_active:
@@ -4530,6 +4583,7 @@ class AssemblyWindow(QMainWindow):
                 action.setEnabled(True)
             self._update_flat_tracy_destination_controls()
             self._update_retail_area_distance_fade_control()
+            self._update_psx_prototype_renderer_notice()
         self._sync_tab_edit_mode()
         if tabs is not None:
             outer_index = tabs.currentIndex()
@@ -4723,10 +4777,14 @@ class AssemblyWindow(QMainWindow):
         return name or "Snapshot"
 
     def _snapshot_renderer_filename_suffix(self) -> str:
-        """Keep forced-row diagnostics visibly distinct by default."""
+        """Keep non-default renderer profiles visibly distinct by default."""
 
         renderer = getattr(self, "snapshot_renderer_combo", None)
-        if renderer is None or renderer.currentData() != "textured_indexed":
+        if renderer is None:
+            return ""
+        if renderer.currentData() == PSX_PROTOTYPE_VIEW_MODE:
+            return "_PSX_PROTO_VISUAL_V1"
+        if renderer.currentData() != "textured_indexed":
             return ""
         parts = []
         if self.viewport.retail_area_distance_fade_enabled:
@@ -4789,7 +4847,7 @@ class AssemblyWindow(QMainWindow):
         except RuntimeError as exc:
             QMessageBox.warning(
                 self,
-                "Retail indexed export aborted",
+                "Renderer export aborted",
                 str(exc),
             )
             return

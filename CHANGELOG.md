@@ -8,6 +8,36 @@ release line.
 
 ## [Unreleased]
 
+### Added
+
+- An opt-in **PSX prototype visualization (experimental)** viewer and Photo
+  Studio mode for loaded PC/OpenUA asset families. Its fixed v1 contract uses
+  affine texture interpolation, nearest-neighbor sampling, and hard polygon
+  edges while explicitly declining to claim PSX asset decoding or
+  cycle-accurate emulation.
+- Renderer-neutral provenance for the PSX visual profile, including its stable
+  ID/version, PC/OpenUA source-asset pipeline, applied raster policies, and
+  explicit status for native resolution, fog, BGR555/STP, dithering, vertex
+  snapping, and primitive queues that remain unvalidated and unapplied.
+
+### Changed
+
+- Manual PSX-profile snapshots fail closed and receive a distinct
+  `_PSX_PROTO_VISUAL_V1` suggested filename. Complete-model batch export keeps
+  PSX output separate from OpenUA and Retail Indexed provenance, and
+  `Skip existing` requires the complete versioned PSX profile to match.
+- Renderer documentation now records the evidence-backed boundary for a later
+  read-only PW3/`UNIT.BIN`, `mhwanh`, `.GFX`, and `DAT`/`IND` browser without
+  implying that the v1 presentation mode already loads those assets.
+
+### Validation
+
+- Canonical-enabled headless discovery covers 517 tests: 516 pass, with one
+  optional `UA_RC1` fixture test skipped and no failures or errors.
+- The focused PSX profile, UI, Snapshot Studio, batch-integrity, OpenUA
+  projective, Retail Indexed integration/canonical, and depth-renderer gate
+  passes 118/118 tests; all 95 tracked/candidate Python files compile.
+
 ## [4.0.0] - 2026-08-18
 
 ### Added

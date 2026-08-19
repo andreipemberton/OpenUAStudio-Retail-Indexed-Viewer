@@ -103,6 +103,29 @@ destination and distance-fade profile; a different or unverifiable profile is
 refused before asset scanning. Older indexed manifests with no distance-fade
 field are interpreted as the historical default, **off**.
 
+### Experimental PSX prototype visualization
+
+A third explicit renderer choice, **PSX prototype visualization
+(experimental)**, applies a narrow platform-informed raster preset to the
+currently loaded PC/OpenUA asset family. Version 1 forces affine texture
+mapping, nearest-neighbor sampling, and hard non-antialiased polygon edges.
+It preserves the current BASE/SKLT/ILBM/VANM geometry, materials, and animation;
+it does not pretend those resources are decoded PlayStation PW3 or
+`UNIT.BIN` data.
+
+Manual snapshot suggestions receive `_PSX_PROTO_VISUAL_V1`, and exports fail
+closed instead of silently saving an OpenUA fallback under that name.
+Complete-model batch manifests record the stable
+`psx_prototype_visual_v1` profile ID, its version, its PC/OpenUA source-asset
+pipeline, and both the applied policies and the PSX behavior that remains
+unvalidated.
+Retail-only TRACY and AREA controls are disabled while this mode is selected,
+without losing their configured values.
+
+See [PSX_PROTOTYPE_PROFILE.md](PSX_PROTOTYPE_PROFILE.md) for the exact v1
+contract, non-claims, batch-provenance rules, and the evidence-backed boundary
+for a later read-only PW3/`UNIT.BIN` asset browser.
+
 Snapshot Studio also exposes a **Flat/LUM-TRACY** destination selector. Its
 default **Live framebuffer - retail** setting preserves the source-traced frame
 clear at palette index zero and reads the actual destination beneath every

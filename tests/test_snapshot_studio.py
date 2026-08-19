@@ -140,6 +140,8 @@ class SnapshotStudioTests(unittest.TestCase):
             self.assertIsInstance(window.play_button, QCheckBox)
             self.assertEqual(window.play_button.text(), "Enable animations")
             self.assertFalse(window.play_button.isChecked())
+            self.assertIn(
+                "all renderer modes", window.play_button.toolTip())
             self.assertTrue(
                 window._snapshot_panel.isAncestorOf(window.play_button))
 
@@ -152,6 +154,59 @@ class SnapshotStudioTests(unittest.TestCase):
             window.snapshot_renderer_combo.setCurrentIndex(indexed)
             self.app.processEvents()
             self.assertTrue(fade.isEnabled())
+        finally:
+            window.close()
+
+    def test_psx_prototype_profile_is_available_with_provenance_notice(self):
+        window = SnapshotStudioWindow()
+        try:
+            combo = window.snapshot_renderer_combo
+            profile = combo.findData("textured_psx_prototype")
+            self.assertGreaterEqual(profile, 0)
+            self.assertEqual(
+                combo.itemText(profile),
+                "PSX prototype visualization (experimental)",
+            )
+            self.assertTrue(
+                window._snapshot_panel.isAncestorOf(
+                    window.snapshot_renderer_notice))
+
+            # Values chosen for retail rendering remain a saved preference
+            # while its controls are unavailable in the PSX visualization.
+            retail = combo.findData("textured_indexed")
+            combo.setCurrentIndex(retail)
+            window.snapshot_distance_fade_check.setChecked(True)
+            forced = window.snapshot_tracy_destination_combo.findData(
+                "forced_diagnostic")
+            window.snapshot_tracy_destination_combo.setCurrentIndex(forced)
+            window.snapshot_tracy_destination_index_spin.setValue(83)
+
+            combo.setCurrentIndex(profile)
+            self.app.processEvents()
+            notice = window.snapshot_renderer_notice
+            self.assertFalse(notice.isHidden())
+            self.assertIn("PC/OpenUA assets", notice.text())
+            self.assertIn("UNIT.BIN/PW3", notice.text())
+            self.assertIn("not cycle-accurate", notice.text())
+            self.assertFalse(window.snapshot_distance_fade_check.isEnabled())
+            self.assertTrue(window.snapshot_distance_fade_check.isChecked())
+            self.assertFalse(
+                window.snapshot_tracy_destination_combo.isEnabled())
+            self.assertFalse(
+                window.snapshot_tracy_destination_index_spin.isEnabled())
+            self.assertEqual(
+                window.snapshot_tracy_destination_combo.currentData(),
+                "forced_diagnostic",
+            )
+            self.assertEqual(
+                window.snapshot_tracy_destination_index_spin.value(), 83)
+            self.assertEqual(
+                window._snapshot_renderer_filename_suffix(),
+                "_PSX_PROTO_VISUAL_V1",
+            )
+            self.assertEqual(
+                window.viewport.view_mode, "textured_psx_prototype")
+            self.assertFalse(window._editing_allowed())
         finally:
             window.close()
 

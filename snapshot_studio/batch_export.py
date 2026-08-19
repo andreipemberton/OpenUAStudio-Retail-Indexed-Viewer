@@ -40,6 +40,10 @@ from PySide6.QtWidgets import (
 from assembly_viewer import (
     AssetViewport,
     INDEXED_EFFECTIVE_RENDERERS,
+    PSX_PROTOTYPE_PROFILE_ID,
+    PSX_PROTOTYPE_PROFILE_INFO,
+    PSX_PROTOTYPE_PROFILE_VERSION,
+    PSX_PROTOTYPE_VIEW_MODE,
     RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE,
     RETAIL_AREA_DISTANCE_FADE_FORMULA,
     RETAIL_AREA_DISTANCE_FADE_LENGTH,
@@ -71,6 +75,15 @@ _FLAT_TRACY_DESTINATION_MODES = {
     "live_framebuffer": "canonical",
     "forced_diagnostic": "diagnostic",
 }
+_REQUESTED_RENDERERS = {
+    "textured": "openua_preview",
+    "textured_indexed": "retail_indexed_reconstructed",
+    PSX_PROTOTYPE_VIEW_MODE: PSX_PROTOTYPE_PROFILE_ID,
+}
+# One shared immutable-by-convention contract prevents viewer and exporter
+# provenance from drifting as later PSX profiles add independently versioned
+# behavior.  Consumers receive copies and never mutate the viewer constant.
+_PSX_PROTOTYPE_PROFILE = dict(PSX_PROTOTYPE_PROFILE_INFO)
 
 
 @dataclass
@@ -110,26 +123,41 @@ class BatchManifestRow:
     effective_renderer: str
     fallback_used: bool
     fallback_reason: str
-    palette_sha256: str
-    shadermp_sha256: str
-    tracyrmp_sha256: str
-    index_buffer_sha256: str
-    requested_flat_tracy_destination_mode: str
+    palette_sha256: str | None
+    shadermp_sha256: str | None
+    tracyrmp_sha256: str | None
+    index_buffer_sha256: str | None
+    requested_flat_tracy_destination_mode: str | None
     requested_flat_tracy_forced_destination_index: int | None
-    effective_flat_tracy_destination_mode: str
-    effective_flat_tracy_destination_class: str
+    effective_flat_tracy_destination_mode: str | None
+    effective_flat_tracy_destination_class: str | None
     effective_flat_tracy_forced_destination_index: int | None
     effective_initial_framebuffer_index: int | None
-    effective_initial_framebuffer_rgb: str
-    effective_flat_tracy_forced_destination_rgb: str
+    effective_initial_framebuffer_rgb: str | None
+    effective_flat_tracy_forced_destination_rgb: str | None
     requested_distance_fade_enabled: bool | None
     effective_distance_fade_enabled: bool | None
-    distance_fade_profile_id: str
+    distance_fade_profile_id: str | None
     distance_fade_visibility_limit: float | None
     distance_fade_start: float | None
     distance_fade_length: float | None
-    distance_fade_distance_space: str
-    distance_fade_formula: str
+    distance_fade_distance_space: str | None
+    distance_fade_formula: str | None
+    profile_id: str | None = None
+    profile_version: int | None = None
+    source_asset_pipeline: str | None = None
+    native_psx_asset_decode: bool | None = None
+    cycle_accurate: bool | None = None
+    texture_interpolation: str | None = None
+    texture_filter: str | None = None
+    polygon_antialiasing: bool | None = None
+    native_resolution: str | None = None
+    fog_draw_distance: str | None = None
+    psx_color_semantics: str | None = None
+    psx_dithering: str | None = None
+    psx_vertex_snapping: str | None = None
+    psx_primitive_queues: str | None = None
+    scope: str | None = None
 
 
 def safe_component(value: str, fallback: str = "unnamed",
@@ -210,6 +238,90 @@ def _manifest_finite_float(value) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _requested_renderer_id(renderer_mode: str) -> str:
+    """Map a viewer mode to its renderer-neutral provenance identifier."""
+
+    mode = str(renderer_mode)
+    return _REQUESTED_RENDERERS.get(mode, mode)
+
+
+def _requested_profile_metadata(renderer_mode: str) -> dict[str, object]:
+    """Return fixed provenance for the selected presentation profile."""
+
+    mode = str(renderer_mode)
+    if mode == PSX_PROTOTYPE_VIEW_MODE:
+        return dict(_PSX_PROTOTYPE_PROFILE)
+    return {
+        "profile_id": _requested_renderer_id(mode),
+        "profile_version": None,
+        "source_asset_pipeline": "pc_openua_asset_family",
+        "native_psx_asset_decode": None,
+        "cycle_accurate": None,
+        "texture_interpolation": None,
+        "texture_filter": None,
+        "polygon_antialiasing": None,
+        "native_resolution": None,
+        "fog_draw_distance": None,
+        "psx_color_semantics": None,
+        "psx_dithering": None,
+        "psx_vertex_snapping": None,
+        "psx_primitive_queues": None,
+        "scope": None,
+    }
+
+
+def _validated_psx_profile_metadata(value) -> dict[str, object]:
+    """Require exact proof for every implemented and deferred PSX feature."""
+
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            "PSX prototype visualization output lacks renderer provenance")
+    for key, expected in _PSX_PROTOTYPE_PROFILE.items():
+        actual = value.get(key)
+        if isinstance(expected, bool):
+            matches = isinstance(actual, bool) and actual is expected
+        elif isinstance(expected, int):
+            matches = (
+                isinstance(actual, int)
+                and not isinstance(actual, bool)
+                and actual == expected
+            )
+        else:
+            matches = isinstance(actual, str) and actual == expected
+        if not matches:
+            raise RuntimeError(
+                "PSX prototype visualization output lacks exact "
+                f"{key}={expected!r} provenance"
+            )
+    return dict(_PSX_PROTOTYPE_PROFILE)
+
+
+def _validate_psx_render_identity(value) -> None:
+    """Require literal proof that the requested PSX pass completed."""
+
+    if not isinstance(value, dict):
+        raise RuntimeError(
+            "PSX prototype visualization output lacks renderer provenance")
+    expected_identity = {
+        "mode": PSX_PROTOTYPE_PROFILE_ID,
+        "requested_mode": PSX_PROTOTYPE_VIEW_MODE,
+        "effective_mode": PSX_PROTOTYPE_PROFILE_ID,
+        "fallback_used": False,
+        "fallback_reason": "",
+    }
+    for key, expected in expected_identity.items():
+        actual = value.get(key)
+        if isinstance(expected, bool):
+            matches = isinstance(actual, bool) and actual is expected
+        else:
+            matches = isinstance(actual, str) and actual == expected
+        if not matches:
+            raise RuntimeError(
+                "PSX prototype visualization output lacks exact "
+                f"{key}={expected!r} renderer proof"
+            )
+
+
 def _requested_destination_profile(
         renderer_mode: str, destination_mode: str,
         forced_index, distance_fade_enabled=False) -> dict[str, object]:
@@ -217,8 +329,11 @@ def _requested_destination_profile(
 
     renderer_mode = str(renderer_mode)
     if renderer_mode != "textured_indexed":
+        profile = _requested_profile_metadata(renderer_mode)
         return {
             "renderer_mode": renderer_mode,
+            "profile_id": profile["profile_id"],
+            "profile_version": profile["profile_version"],
             "flat_tracy_destination_mode": None,
             "flat_tracy_forced_destination_index": None,
             "distance_fade_enabled": None,
@@ -240,6 +355,8 @@ def _requested_destination_profile(
     fade_enabled = bool(_manifest_bool(distance_fade_enabled) or False)
     return {
         "renderer_mode": renderer_mode,
+        "profile_id": None,
+        "profile_version": None,
         "flat_tracy_destination_mode": destination_mode,
         "flat_tracy_forced_destination_index": normalized_index,
         "distance_fade_enabled": fade_enabled,
@@ -316,6 +433,11 @@ def _destination_profile_label(profile: dict[str, object]) -> str:
     """Return a concise human-readable label for collision messages."""
 
     renderer_mode = str(profile.get("renderer_mode", "unknown"))
+    if renderer_mode == PSX_PROTOTYPE_VIEW_MODE:
+        return (
+            "PSX prototype visualization / profile "
+            f"{profile.get('profile_id')} v{profile.get('profile_version')}"
+        )
     if renderer_mode != "textured_indexed":
         return renderer_mode
     mode = profile.get("flat_tracy_destination_mode")
@@ -327,6 +449,100 @@ def _destination_profile_label(profile: dict[str, object]) -> str:
     fade = "distance fade on" if profile.get(
         "distance_fade_enabled") else "distance fade off"
     return f"{label} / {fade}"
+
+
+def _normalized_manifest_png_path(value) -> str:
+    """Return a case-insensitive safe relative PNG key, or an empty string."""
+
+    if not isinstance(value, str) or not value:
+        return ""
+    path = PurePosixPath(value.replace("\\", "/"))
+    if path.is_absolute() or ".." in path.parts:
+        return ""
+    normalized = "/".join(part for part in path.parts if part not in {"", "."})
+    if not normalized.lower().endswith(".png"):
+        return ""
+    return normalized.casefold()
+
+
+def _psx_existing_png_provenance_reason(root: Path) -> str:
+    """Prove that every retained PNG was written by this exact PSX profile."""
+
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        return (
+            "The selected folder contains PSX-profile PNG files but has no "
+            "manifest.json proving each retained image."
+        )
+    try:
+        rows = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return (
+            "The selected folder contains PSX-profile PNG files, but its "
+            f"manifest.json cannot be verified ({exc})."
+        )
+    if not isinstance(rows, list):
+        return (
+            "The selected folder's manifest.json is not a verifiable list "
+            "of PSX-profile image records."
+        )
+
+    rows_by_path: dict[str, dict] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _normalized_manifest_png_path(row.get("relative_file"))
+        if not key:
+            continue
+        if key in rows_by_path:
+            return (
+                "The selected folder's manifest.json contains duplicate "
+                f"records for {row.get('relative_file')!r}."
+            )
+        rows_by_path[key] = row
+
+    for directory, _children, filenames in os.walk(root, followlinks=False):
+        for filename in filenames:
+            if not filename.lower().endswith(".png"):
+                continue
+            path = Path(directory) / filename
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                return f"A retained PNG lies outside the batch root: {path}"
+            key = _normalized_manifest_png_path(relative)
+            row = rows_by_path.get(key)
+            if row is None:
+                return (
+                    f"Retained PSX-profile PNG {relative!r} has no matching "
+                    "manifest record."
+                )
+            if row.get("status") != "WRITTEN":
+                return (
+                    f"Retained PSX-profile PNG {relative!r} was not a "
+                    "verified WRITTEN image in the prior manifest."
+                )
+            if row.get("requested_renderer") != PSX_PROTOTYPE_PROFILE_ID \
+                    or row.get("effective_renderer") \
+                    != PSX_PROTOTYPE_PROFILE_ID:
+                return (
+                    f"Retained PSX-profile PNG {relative!r} lacks exact "
+                    "requested/effective renderer proof."
+                )
+            if row.get("fallback_used") is not False \
+                    or row.get("fallback_reason") != "":
+                return (
+                    f"Retained PSX-profile PNG {relative!r} lacks literal "
+                    "no-fallback proof."
+                )
+            try:
+                _validated_psx_profile_metadata(row)
+            except RuntimeError as exc:
+                return (
+                    f"Retained PSX-profile PNG {relative!r} lacks the exact "
+                    f"v1 policy record ({exc})."
+                )
+    return ""
 
 
 class VPSnapshotBatchPanel(QGroupBox):
@@ -696,6 +912,18 @@ class VPSnapshotBatchPanel(QGroupBox):
         viewport.set_snapshot_guides_visible(False)
         return viewport
 
+    @staticmethod
+    def _viewport_renderer_info(viewport) -> dict | None:
+        """Read renderer-neutral metadata with legacy indexed compatibility."""
+
+        if viewport is None:
+            return None
+        renderer_info = getattr(viewport, "renderer_info", None)
+        if isinstance(renderer_info, dict):
+            return renderer_info
+        indexed_info = getattr(viewport, "indexed_renderer_info", None)
+        return indexed_info if isinstance(indexed_info, dict) else None
+
     def _skip_existing_profile_collision_reason(self) -> str:
         """Reject unsafe Skip-existing reuse across renderer profiles."""
 
@@ -736,6 +964,60 @@ class VPSnapshotBatchPanel(QGroupBox):
                 "The selected folder contains PNG files, but run_info.json "
                 "does not identify their renderer mode."
             )
+        summary = existing_info.get("renderer_summary")
+        if not isinstance(summary, dict):
+            summary = {}
+        recorded_profile_id = existing_info.get(
+            "profile_id", summary.get("profile_id"))
+        recorded_profile_version = existing_info.get(
+            "profile_version", summary.get("profile_version"))
+        if renderer_mode == PSX_PROTOTYPE_VIEW_MODE:
+            if not isinstance(recorded_profile_id, str) \
+                    or not recorded_profile_id:
+                return (
+                    "The selected folder contains PSX-profile PNG files, but "
+                    "run_info.json does not prove their visual profile ID."
+                )
+            if not isinstance(recorded_profile_version, int) \
+                    or isinstance(recorded_profile_version, bool):
+                return (
+                    "The selected folder contains PSX-profile PNG files, but "
+                    "run_info.json does not prove their visual profile "
+                    "version."
+                )
+            if recorded_profile_id != PSX_PROTOTYPE_PROFILE_ID \
+                    or recorded_profile_version \
+                    != PSX_PROTOTYPE_PROFILE_VERSION:
+                return (
+                    "The selected folder contains snapshots from PSX visual "
+                    f"profile {recorded_profile_id} v"
+                    f"{recorded_profile_version}, while this batch requests "
+                    f"{PSX_PROTOTYPE_PROFILE_ID} v"
+                    f"{PSX_PROTOTYPE_PROFILE_VERSION}."
+                )
+            recorded_psx_profile = {
+                key: (
+                    summary.get(
+                        key,
+                        existing_info.get(
+                            "profile_scope", existing_info.get("scope")),
+                    )
+                    if key == "scope"
+                    else summary.get(key, existing_info.get(key))
+                )
+                for key in _PSX_PROTOTYPE_PROFILE
+            }
+            try:
+                _validated_psx_profile_metadata(recorded_psx_profile)
+            except RuntimeError as exc:
+                return (
+                    "The selected folder contains PSX-profile PNG files, but "
+                    "run_info.json does not prove the exact output-affecting "
+                    f"visual profile policy ({exc})."
+                )
+            retained_reason = _psx_existing_png_provenance_reason(self._root)
+            if retained_reason:
+                return retained_reason
         destination_mode = existing_info.get(
             "indexed_flat_tracy_destination_mode_requested")
         forced_index = existing_info.get(
@@ -746,9 +1028,6 @@ class VPSnapshotBatchPanel(QGroupBox):
         recorded_fade_profile = existing_info.get(
             "indexed_distance_fade_profile_requested", missing)
         if renderer_mode == "textured_indexed":
-            summary = existing_info.get("renderer_summary")
-            if not isinstance(summary, dict):
-                summary = {}
             if destination_mode is None:
                 destination_mode = summary.get(
                     "requested_flat_tracy_destination_mode")
@@ -798,6 +1077,11 @@ class VPSnapshotBatchPanel(QGroupBox):
         existing_profile = _requested_destination_profile(
             renderer_mode, destination_mode, forced_index,
             distance_fade_enabled)
+        if renderer_mode == PSX_PROTOTYPE_VIEW_MODE:
+            # Do not manufacture identity for an older or mislabeled record:
+            # compare the exact values that run_info.json actually proved.
+            existing_profile["profile_id"] = recorded_profile_id
+            existing_profile["profile_version"] = recorded_profile_version
         requested_profile = _requested_destination_profile(
             self._renderer_mode,
             self._flat_tracy_destination_mode,
@@ -1123,7 +1407,8 @@ class VPSnapshotBatchPanel(QGroupBox):
             if image.isNull():
                 raise RuntimeError(
                     "Snapshot renderer returned a null image")
-            renderer_info = self._batch_viewport.indexed_renderer_info
+            renderer_info = VPSnapshotBatchPanel._viewport_renderer_info(
+                self._batch_viewport)
             # Prove exact renderer/profile provenance before committing the
             # PNG. Missing indexed fade statistics must fail closed rather
             # than being reconstructed from static viewer descriptors later.
@@ -1142,8 +1427,8 @@ class VPSnapshotBatchPanel(QGroupBox):
                 renderer_info=(
                     renderer_info
                     if renderer_info is not None else (
-                        self._batch_viewport.indexed_renderer_info
-                        if self._batch_viewport is not None else None)
+                        VPSnapshotBatchPanel._viewport_renderer_info(
+                            self._batch_viewport))
                 ),
                 renderer_reason=message,
             )
@@ -1160,8 +1445,8 @@ class VPSnapshotBatchPanel(QGroupBox):
                 renderer_info=(
                     renderer_info
                     if renderer_info is not None else (
-                        self._batch_viewport.indexed_renderer_info
-                        if self._batch_viewport is not None else None)
+                        VPSnapshotBatchPanel._viewport_renderer_info(
+                            self._batch_viewport))
                 ),
             )
             self._written += 1
@@ -1245,6 +1530,21 @@ class VPSnapshotBatchPanel(QGroupBox):
             renderer["distance_fade_length"],
             renderer["distance_fade_distance_space"],
             renderer["distance_fade_formula"],
+            renderer["profile_id"],
+            renderer["profile_version"],
+            renderer["source_asset_pipeline"],
+            renderer["native_psx_asset_decode"],
+            renderer["cycle_accurate"],
+            renderer["texture_interpolation"],
+            renderer["texture_filter"],
+            renderer["polygon_antialiasing"],
+            renderer["native_resolution"],
+            renderer["fog_draw_distance"],
+            renderer["psx_color_semantics"],
+            renderer["psx_dithering"],
+            renderer["psx_vertex_snapping"],
+            renderer["psx_primitive_queues"],
+            renderer["scope"],
         ))
 
     def _renderer_manifest_fields(
@@ -1253,11 +1553,8 @@ class VPSnapshotBatchPanel(QGroupBox):
             existing_unverified: bool = False,
             reason: str = "") -> dict[str, object]:
         status = str(status).upper()
-        requested = (
-            "retail_indexed_reconstructed"
-            if self._renderer_mode == "textured_indexed"
-            else "openua_preview"
-        )
+        renderer_mode = str(getattr(self, "_renderer_mode", "textured"))
+        requested = _requested_renderer_id(renderer_mode)
         existing_output = (
             existing_unverified
             or status in {"EXISTS", "ERROR_EXISTING_RETAINED"}
@@ -1270,7 +1567,9 @@ class VPSnapshotBatchPanel(QGroupBox):
                 "existing file retained without renderer/source verification")
         elif not rendered_output:
             effective = "not_rendered"
-            if requested == "retail_indexed_reconstructed":
+            if requested in {
+                    "retail_indexed_reconstructed",
+                    PSX_PROTOTYPE_PROFILE_ID}:
                 fallback = bool(
                     isinstance(renderer_info, dict)
                     and renderer_info.get("fallback_used", False)
@@ -1297,6 +1596,11 @@ class VPSnapshotBatchPanel(QGroupBox):
             fallback_reason = str(
                 renderer_info.get("fallback_reason", "") or reason)
 
+        exact_psx_output = False
+        if rendered_output and requested == PSX_PROTOTYPE_PROFILE_ID:
+            _validate_psx_render_identity(renderer_info)
+            exact_psx_output = True
+
         indexed_attempt = (
             requested == "retail_indexed_reconstructed"
             and isinstance(renderer_info, dict)
@@ -1315,15 +1619,18 @@ class VPSnapshotBatchPanel(QGroupBox):
             and not fallback
         )
         requested_profile = _requested_destination_profile(
-            getattr(self, "_renderer_mode", "textured"),
+            renderer_mode,
             getattr(
                 self, "_flat_tracy_destination_mode", "live_framebuffer"),
             getattr(self, "_flat_tracy_forced_destination_index", 0),
             getattr(self, "_distance_fade_enabled", False),
         )
+        psx_request = requested == PSX_PROTOTYPE_PROFILE_ID
+        inactive_retail_text = None if psx_request else ""
         requested_destination_mode = (
             str(requested_profile["flat_tracy_destination_mode"])
-            if requested == "retail_indexed_reconstructed" else ""
+            if requested == "retail_indexed_reconstructed"
+            else inactive_retail_text
         )
         requested_forced_index = (
             requested_profile["flat_tracy_forced_destination_index"]
@@ -1333,19 +1640,19 @@ class VPSnapshotBatchPanel(QGroupBox):
             bool(requested_profile["distance_fade_enabled"])
             if requested == "retail_indexed_reconstructed" else None
         )
-        effective_destination_mode = ""
-        effective_destination_class = ""
+        effective_destination_mode = inactive_retail_text
+        effective_destination_class = inactive_retail_text
         effective_forced_index = None
         effective_initial_index = None
-        effective_initial_rgb = ""
-        effective_forced_rgb = ""
+        effective_initial_rgb = inactive_retail_text
+        effective_forced_rgb = inactive_retail_text
         effective_distance_fade_enabled = None
-        distance_fade_profile_id = ""
+        distance_fade_profile_id = inactive_retail_text
         distance_fade_visibility_limit = None
         distance_fade_start = None
         distance_fade_length = None
-        distance_fade_distance_space = ""
-        distance_fade_formula = ""
+        distance_fade_distance_space = inactive_retail_text
+        distance_fade_formula = inactive_retail_text
         if exact_indexed_output:
             stats_fade_profile = stats.get("distance_fade_profile", {})
             if not isinstance(stats_fade_profile, dict):
@@ -1426,19 +1733,32 @@ class VPSnapshotBatchPanel(QGroupBox):
                 if requested_distance_fade_enabled
                 else str(renderer_info.get("distance_fade_formula", "") or "")
             )
+        profile_metadata = {
+            key: None for key in _PSX_PROTOTYPE_PROFILE
+        }
+        if exact_psx_output:
+            profile_metadata = _validated_psx_profile_metadata(renderer_info)
+        elif rendered_output and (
+                requested == "openua_preview" or exact_indexed_output):
+            profile_metadata = _requested_profile_metadata(renderer_mode)
+        retail_hash = None if psx_request else ""
         return {
             "requested_renderer": requested,
             "effective_renderer": effective,
             "fallback_used": fallback,
             "fallback_reason": fallback_reason,
-            "palette_sha256": str(
-                sources.get("palette", {}).get("sha256", "")),
-            "shadermp_sha256": str(
-                sources.get("shader", {}).get("sha256", "")),
-            "tracyrmp_sha256": str(
-                sources.get("tracy", {}).get("sha256", "")),
-            "index_buffer_sha256": str(
-                stats.get("index_buffer_sha256", "")),
+            "palette_sha256": (
+                retail_hash if psx_request else str(
+                    sources.get("palette", {}).get("sha256", ""))),
+            "shadermp_sha256": (
+                retail_hash if psx_request else str(
+                    sources.get("shader", {}).get("sha256", ""))),
+            "tracyrmp_sha256": (
+                retail_hash if psx_request else str(
+                    sources.get("tracy", {}).get("sha256", ""))),
+            "index_buffer_sha256": (
+                retail_hash if psx_request else str(
+                    stats.get("index_buffer_sha256", ""))),
             "requested_flat_tracy_destination_mode": (
                 requested_destination_mode),
             "requested_flat_tracy_forced_destination_index": (
@@ -1464,6 +1784,7 @@ class VPSnapshotBatchPanel(QGroupBox):
             "distance_fade_length": distance_fade_length,
             "distance_fade_distance_space": distance_fade_distance_space,
             "distance_fade_formula": distance_fade_formula,
+            **profile_metadata,
         }
 
     def _write_manifests(self, cancelled: bool) -> None:
@@ -1544,12 +1865,15 @@ class VPSnapshotBatchPanel(QGroupBox):
             "distance_fade_enabled"]
         requested_distance_fade_profile = (
             _recorded_distance_fade_profile(requested_profile))
+        profile_metadata = _requested_profile_metadata(self._renderer_mode)
+        top_level_profile_metadata = {
+            key: value for key, value in profile_metadata.items()
+            if key != "scope"
+        }
         renderer_summary = {
-            "requested_renderer": (
-                "retail_indexed_reconstructed"
-                if self._renderer_mode == "textured_indexed"
-                else "openua_preview"
-            ),
+            "requested_renderer": _requested_renderer_id(
+                self._renderer_mode),
+            **profile_metadata,
             "outcome_counts": outcome_counts,
             "written_effective_image_counts": written_effective_counts,
             "fallback_written_rows": sum(
@@ -1641,12 +1965,17 @@ class VPSnapshotBatchPanel(QGroupBox):
                 "Destination mode/index changes do not alter image filenames. "
                 "Distance-fade changes do not alter them either. Skip-existing "
                 "resume is permitted only when run_info.json proves the same "
-                "renderer/destination/fade profile; otherwise use a separate "
-                "output folder or overwrite intentionally."
+                "renderer and visual-profile ID/version, plus the same retail "
+                "destination/fade profile where applicable; otherwise use a "
+                "separate output folder or overwrite intentionally."
             ),
             "skip_existing_collision_policy": (
                 "populated_output_requires_matching_run_info_renderer_and_"
                 "destination_and_distance_fade_profile"
+            ),
+            "skip_existing_collision_identity": (
+                "renderer_mode_and_visual_profile_id_version_and_applicable_"
+                "retail_destination_distance_fade_profile"
             ),
             "source_profiles": [
                 {
@@ -1663,7 +1992,8 @@ class VPSnapshotBatchPanel(QGroupBox):
                 "is authoritative in manifest.json. Destination mode/index "
                 "and distance-fade changes do not alter filenames; Skip "
                 "existing refuses a populated folder unless its prior "
-                "run_info proves the same renderer/destination/fade profile"
+                "run_info proves the same renderer/profile identity and any "
+                "applicable retail destination/fade profile"
             ),
         }
         if attempted_source_profiles:
@@ -1699,6 +2029,11 @@ class VPSnapshotBatchPanel(QGroupBox):
             "guides": False,
             "animation_frame": "initial/reset",
             "renderer_mode": self._renderer_mode,
+            **top_level_profile_metadata,
+            # ``scope`` below describes the batch corpus. Keep the renderer
+            # profile's narrower claim under an unambiguous key while the
+            # renderer_summary retains the complete flat profile contract.
+            "profile_scope": profile_metadata["scope"],
             "indexed_flat_tracy_destination_mode_requested": (
                 requested_destination_mode
                 if self._renderer_mode == "textured_indexed" else None

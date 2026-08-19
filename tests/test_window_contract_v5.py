@@ -102,6 +102,8 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertIsInstance(window.play_button, QCheckBox)
             self.assertEqual(window.play_button.text(), "Enable animations")
             self.assertFalse(window.play_button.isChecked())
+            self.assertIn(
+                "all renderer modes", window.play_button.toolTip())
             self.assertTrue(window.auto_align_check.isChecked())
             self.assertEqual(window._resources_tabs.tabText(0), "Bas Manager")
             self.assertFalse(hasattr(window, "global_edit_button"))
@@ -194,6 +196,88 @@ class WindowContractV5Tests(unittest.TestCase):
             self.app.processEvents()
             self.assertEqual(window.viewport.view_mode, "textured")
             self.assertEqual(window.mode_combo.currentData(), "textured")
+        finally:
+            window.close()
+
+    def test_psx_prototype_visualization_is_explicit_synced_and_truthful(self):
+        window = AssemblyWindow()
+        try:
+            toolbar_index = window.mode_combo.findData(
+                "textured_psx_prototype")
+            snapshot_index = window.snapshot_renderer_combo.findData(
+                "textured_psx_prototype")
+            self.assertGreaterEqual(toolbar_index, 0)
+            self.assertGreaterEqual(snapshot_index, 0)
+            self.assertEqual(
+                window.mode_combo.itemText(toolbar_index),
+                "Textured — PSX prototype visualization (experimental)",
+            )
+            self.assertEqual(
+                window.snapshot_renderer_combo.itemText(snapshot_index),
+                "PSX prototype visualization (experimental)",
+            )
+
+            notice = window.snapshot_renderer_notice
+            notice_text = notice.text()
+            self.assertTrue(notice.isHidden())
+            self.assertIn("PC/OpenUA assets", notice_text)
+            self.assertIn("does not load PlayStation UNIT.BIN/PW3", notice_text)
+            self.assertIn("not cycle-accurate PSX emulation", notice_text)
+            self.assertEqual(
+                window.snapshot_renderer_combo.itemData(
+                    snapshot_index, Qt.ItemDataRole.ToolTipRole),
+                notice_text,
+            )
+
+            # Configure the retail-only controls before changing renderer.
+            retail = window.snapshot_renderer_combo.findData(
+                "textured_indexed")
+            window.snapshot_renderer_combo.setCurrentIndex(retail)
+            window.snapshot_distance_fade_check.setChecked(True)
+            forced = window.snapshot_tracy_destination_combo.findData(
+                "forced_diagnostic")
+            window.snapshot_tracy_destination_combo.setCurrentIndex(forced)
+            window.snapshot_tracy_destination_index_spin.setValue(47)
+            self.app.processEvents()
+
+            window.snapshot_renderer_combo.setCurrentIndex(snapshot_index)
+            self.app.processEvents()
+            self.assertEqual(
+                window.viewport.view_mode, "textured_psx_prototype")
+            self.assertEqual(
+                window.mode_combo.currentData(), "textured_psx_prototype")
+            self.assertFalse(notice.isHidden())
+            self.assertEqual(
+                window.snapshot_renderer_combo.toolTip(), notice_text)
+            self.assertEqual(window.mode_combo.toolTip(), notice_text)
+
+            # Retail settings are unavailable in this mode but remain intact
+            # for a later return to the retail indexed renderer.
+            self.assertFalse(window.snapshot_distance_fade_check.isEnabled())
+            self.assertTrue(window.snapshot_distance_fade_check.isChecked())
+            self.assertTrue(window.viewport.distance_fade_enabled)
+            self.assertFalse(
+                window.snapshot_tracy_destination_combo.isEnabled())
+            self.assertFalse(
+                window.snapshot_tracy_destination_index_spin.isEnabled())
+            self.assertEqual(
+                window.snapshot_tracy_destination_combo.currentData(),
+                "forced_diagnostic",
+            )
+            self.assertEqual(
+                window.snapshot_tracy_destination_index_spin.value(), 47)
+            self.assertEqual(
+                window._snapshot_renderer_filename_suffix(),
+                "_PSX_PROTO_VISUAL_V1",
+            )
+
+            window.mode_combo.setCurrentIndex(
+                window.mode_combo.findData("textured"))
+            self.app.processEvents()
+            self.assertEqual(
+                window.snapshot_renderer_combo.currentData(), "textured")
+            self.assertTrue(notice.isHidden())
+            self.assertEqual(window.snapshot_renderer_combo.toolTip(), "")
         finally:
             window.close()
 

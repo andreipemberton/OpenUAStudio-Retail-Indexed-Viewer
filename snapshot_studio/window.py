@@ -181,7 +181,7 @@ class SnapshotStudioWindow(AssemblyWindow):
         self.play_button.setToolTip(
             "Continuously play resolved VANM texture and effect frames. "
             "Uncheck to freeze the current frame; Reset Frame returns to "
-            "frame 1. Applies to both renderers. Complete-model batch "
+            "frame 1. Applies to all renderer modes. Complete-model batch "
             "exports remain deterministic at the reset frame.")
         self.play_button.toggled.connect(self._toggle_play)
 

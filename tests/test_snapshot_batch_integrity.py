@@ -16,6 +16,9 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from assembly_viewer import (
+    PSX_PROTOTYPE_PROFILE_ID,
+    PSX_PROTOTYPE_PROFILE_VERSION,
+    PSX_PROTOTYPE_VIEW_MODE,
     RETAIL_AREA_DISTANCE_FADE_DISTANCE_SPACE,
     RETAIL_AREA_DISTANCE_FADE_FORMULA,
 )
@@ -78,6 +81,37 @@ def _source() -> SnapshotSource:
         "Skeleton/VP_TEST.sklt", "VP_0001_TEST", "root",
         "Skeleton/VP_TEST.sklt", object(), None, False,
     )
+
+
+def _psx_renderer_info(**overrides) -> dict:
+    info = {
+        "mode": PSX_PROTOTYPE_PROFILE_ID,
+        "requested_mode": PSX_PROTOTYPE_VIEW_MODE,
+        "effective_mode": PSX_PROTOTYPE_PROFILE_ID,
+        "fallback_used": False,
+        "fallback_reason": "",
+        "profile_id": PSX_PROTOTYPE_PROFILE_ID,
+        "profile_version": PSX_PROTOTYPE_PROFILE_VERSION,
+        "source_asset_pipeline": "pc_openua_asset_family",
+        "native_psx_asset_decode": False,
+        "cycle_accurate": False,
+        "texture_interpolation": "affine",
+        "texture_filter": "nearest",
+        "polygon_antialiasing": False,
+        "native_resolution": "unvalidated_not_applied",
+        "fog_draw_distance": "unvalidated_not_applied",
+        "psx_color_semantics": "unvalidated_not_applied",
+        "psx_dithering": "unvalidated_not_applied",
+        "psx_vertex_snapping": "unvalidated_not_applied",
+        "psx_primitive_queues": "unvalidated_not_applied",
+        "scope": (
+            "platform-informed presentation of the loaded PC/OpenUA asset; "
+            "does not decode PSX UNIT.BIN, PW3, GFX, DAT/IND, or prototype "
+            "animation data"
+        ),
+    }
+    info.update(overrides)
+    return info
 
 
 class _Label:
@@ -434,6 +468,240 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             self.assertIsNone(fields["requested_distance_fade_enabled"])
             self.assertIsNone(fields["effective_distance_fade_enabled"])
             self.assertIsNone(fields["distance_fade_visibility_limit"])
+
+    def test_psx_profile_is_renderer_neutral_and_retail_fields_are_null(self):
+        panel = SimpleNamespace(_renderer_mode=PSX_PROTOTYPE_VIEW_MODE)
+
+        fields = VPSnapshotBatchPanel._renderer_manifest_fields(
+            panel, _psx_renderer_info(), status="WRITTEN")
+
+        self.assertEqual(
+            fields["requested_renderer"], PSX_PROTOTYPE_PROFILE_ID)
+        self.assertEqual(
+            fields["effective_renderer"], PSX_PROTOTYPE_PROFILE_ID)
+        self.assertEqual(fields["profile_id"], PSX_PROTOTYPE_PROFILE_ID)
+        self.assertEqual(
+            fields["profile_version"], PSX_PROTOTYPE_PROFILE_VERSION)
+        self.assertEqual(
+            fields["source_asset_pipeline"], "pc_openua_asset_family")
+        self.assertFalse(fields["native_psx_asset_decode"])
+        self.assertFalse(fields["cycle_accurate"])
+        self.assertEqual(fields["texture_interpolation"], "affine")
+        self.assertEqual(fields["texture_filter"], "nearest")
+        self.assertFalse(fields["polygon_antialiasing"])
+        for key in (
+                "native_resolution", "fog_draw_distance",
+                "psx_color_semantics", "psx_dithering",
+                "psx_vertex_snapping", "psx_primitive_queues"):
+            self.assertEqual(fields[key], "unvalidated_not_applied")
+        for key in (
+                "palette_sha256", "shadermp_sha256", "tracyrmp_sha256",
+                "index_buffer_sha256",
+                "requested_flat_tracy_destination_mode",
+                "requested_flat_tracy_forced_destination_index",
+                "effective_flat_tracy_destination_mode",
+                "effective_flat_tracy_destination_class",
+                "effective_flat_tracy_forced_destination_index",
+                "effective_initial_framebuffer_index",
+                "effective_initial_framebuffer_rgb",
+                "effective_flat_tracy_forced_destination_rgb",
+                "requested_distance_fade_enabled",
+                "effective_distance_fade_enabled", "distance_fade_profile_id",
+                "distance_fade_visibility_limit", "distance_fade_start",
+                "distance_fade_length", "distance_fade_distance_space",
+                "distance_fade_formula"):
+            self.assertIsNone(fields[key], key)
+
+    def test_psx_profile_fails_closed_on_inexact_policy_provenance(self):
+        panel = SimpleNamespace(_renderer_mode=PSX_PROTOTYPE_VIEW_MODE)
+        mutations = {
+            "mode": "openua_preview",
+            "requested_mode": "textured",
+            "fallback_used": 0,
+            "fallback_reason": "synthetic fallback",
+            "profile_version": True,
+            "texture_interpolation": "projective",
+            "texture_filter": "smooth",
+            "polygon_antialiasing": True,
+            "native_resolution": "applied",
+            "psx_dithering": None,
+        }
+
+        for key, value in mutations.items():
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(RuntimeError, key):
+                    VPSnapshotBatchPanel._renderer_manifest_fields(
+                        panel,
+                        _psx_renderer_info(**{key: value}),
+                        status="WRITTEN",
+                    )
+
+    def test_renderer_neutral_metadata_precedes_stale_indexed_metadata(self):
+        psx_info = _psx_renderer_info()
+        viewport = SimpleNamespace(
+            renderer_info=psx_info,
+            indexed_renderer_info={
+                "effective_mode": "retail_indexed_reconstructed"},
+        )
+
+        self.assertIs(
+            VPSnapshotBatchPanel._viewport_renderer_info(viewport), psx_info)
+
+    def test_psx_skip_existing_requires_exact_profile_and_policy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "front.png").write_bytes(b"png")
+            panel = SimpleNamespace(
+                _root=root,
+                _renderer_mode=PSX_PROTOTYPE_VIEW_MODE,
+                _flat_tracy_destination_mode="forced_diagnostic",
+                _flat_tracy_forced_destination_index=31,
+                _distance_fade_enabled=True,
+                skip_existing_check=SimpleNamespace(isChecked=lambda: True),
+            )
+            run_info = {
+                "renderer_mode": PSX_PROTOTYPE_VIEW_MODE,
+                **{
+                    key: value for key, value in _psx_renderer_info().items()
+                    if key not in {
+                        "effective_mode", "fallback_used", "fallback_reason"}
+                },
+            }
+            renderer_fields = VPSnapshotBatchPanel._renderer_manifest_fields(
+                panel, _psx_renderer_info(), status="WRITTEN")
+            (root / "manifest.json").write_text(
+                json.dumps([{
+                    "relative_file": "front.png",
+                    "status": "WRITTEN",
+                    **renderer_fields,
+                }]),
+                encoding="utf-8",
+            )
+
+            (root / "run_info.json").write_text(
+                json.dumps({"renderer_mode": PSX_PROTOTYPE_VIEW_MODE}),
+                encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("visual profile ID", reason)
+
+            wrong_version = {**run_info, "profile_version": 2}
+            (root / "run_info.json").write_text(
+                json.dumps(wrong_version), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("psx_prototype_visual_v1 v2", reason)
+            self.assertIn("psx_prototype_visual_v1 v1", reason)
+
+            wrong_policy = {**run_info, "psx_dithering": "applied"}
+            (root / "run_info.json").write_text(
+                json.dumps(wrong_policy), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("output-affecting visual profile policy", reason)
+
+            (root / "run_info.json").write_text(
+                json.dumps(run_info), encoding="utf-8")
+            self.assertEqual(
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel), "")
+
+    def test_psx_run_info_and_manifest_record_fixed_profile_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            panel = SimpleNamespace(
+                _root=root,
+                _rows=[],
+                _warnings=[],
+                _renderer_mode=PSX_PROTOTYPE_VIEW_MODE,
+                _flat_tracy_destination_mode="forced_diagnostic",
+                _flat_tracy_forced_destination_index=31,
+                _distance_fade_enabled=True,
+                window=SimpleNamespace(
+                    _setbas=None, _vp_source="", _vp_source_path=""),
+                _sources=[_source()],
+                _target_size=QSize(512, 512),
+                _zoom=100,
+                _written=1,
+                _existing=0,
+                _skipped_models=0,
+                _failed=0,
+                _started_at=0.0,
+            )
+            panel._renderer_manifest_fields = MethodType(
+                VPSnapshotBatchPanel._renderer_manifest_fields, panel)
+            panel._record = MethodType(VPSnapshotBatchPanel._record, panel)
+            panel._record(
+                _source(), "Front", "VP/front.png", "WRITTEN", "written",
+                renderer_info=_psx_renderer_info())
+
+            VPSnapshotBatchPanel._write_manifests(panel, cancelled=False)
+
+            manifest = json.loads(
+                (root / "manifest.json").read_text(encoding="utf-8"))
+            run_info = json.loads(
+                (root / "run_info.json").read_text(encoding="utf-8"))
+            row = manifest[0]
+            summary = run_info["renderer_summary"]
+            for record in (row, summary, run_info):
+                self.assertEqual(
+                    record["profile_id"], PSX_PROTOTYPE_PROFILE_ID)
+                self.assertEqual(
+                    record["profile_version"],
+                    PSX_PROTOTYPE_PROFILE_VERSION)
+                self.assertEqual(
+                    record["source_asset_pipeline"],
+                    "pc_openua_asset_family")
+                self.assertFalse(record["native_psx_asset_decode"])
+                self.assertEqual(
+                    record["psx_primitive_queues"],
+                    "unvalidated_not_applied")
+            self.assertEqual(
+                summary["requested_renderer"], PSX_PROTOTYPE_PROFILE_ID)
+            self.assertEqual(
+                summary["written_effective_image_counts"],
+                {PSX_PROTOTYPE_PROFILE_ID: 1})
+            self.assertEqual(
+                summary["skip_existing_collision_identity"],
+                "renderer_mode_and_visual_profile_id_version_and_applicable_"
+                "retail_destination_distance_fade_profile")
+            self.assertIsNone(
+                run_info[
+                    "indexed_flat_tracy_destination_mode_requested"])
+            self.assertIsNone(
+                run_info["indexed_distance_fade_enabled_requested"])
+            self.assertIsNone(row["palette_sha256"])
+            self.assertIsNone(
+                row["requested_flat_tracy_destination_mode"])
+            self.assertIsNone(row["requested_distance_fade_enabled"])
+
+            expected_scope = _psx_renderer_info()["scope"]
+            self.assertEqual(row["scope"], expected_scope)
+            self.assertEqual(summary["scope"], expected_scope)
+            self.assertEqual(run_info["profile_scope"], expected_scope)
+            self.assertNotEqual(run_info["scope"], expected_scope)
+
+            image = root / "VP" / "front.png"
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_bytes(b"png")
+            panel.skip_existing_check = SimpleNamespace(
+                isChecked=lambda: True)
+            self.assertEqual(
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel), "")
+
+            manifest[0]["status"] = "ERROR_EXISTING_RETAINED"
+            manifest[0]["effective_renderer"] = (
+                "existing_file_not_verified")
+            (root / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8")
+            reason = (
+                VPSnapshotBatchPanel.
+                _skip_existing_profile_collision_reason(panel))
+            self.assertIn("was not a verified WRITTEN image", reason)
 
     def test_indexed_attempt_profile_excludes_stale_frame_hash_on_error(self):
         panel = SimpleNamespace(

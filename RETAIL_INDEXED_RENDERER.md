@@ -23,11 +23,15 @@ py -3.12 -m venv .venv
 ```
 
 Open a local `.base` asset or `SET.BAS`, select a set-specific data root when
-prompted, and choose one of the two textured modes:
+prompted, and choose one of the textured renderer modes:
 
 - **Textured - OpenUA preview** keeps the existing renderer and remains the
   default.
 - **Textured - Retail indexed (reconstructed)** enables the indexed path.
+- **Textured - PSX prototype visualization (experimental)** applies the fixed
+  affine/nearest/hard-edge v1 presentation profile documented in
+  [PSX_PROTOTYPE_PROFILE.md](PSX_PROTOTYPE_PROFILE.md); it does not decode PSX
+  assets or emulate the PSX renderer.
 
 Snapshot Studio's **Background** group contains a separate **Flat/LUM-TRACY**
 policy control:
@@ -65,7 +69,7 @@ that is reproducible source-model space, but it is not a recovered mission or
 world placement.
 
 The top toolbar's **Enable animations** checkbox controls continuous VANM and
-effect-frame playback for both textured renderers. Unchecking it freezes the
+effect-frame playback for all textured renderer modes. Unchecking it freezes the
 displayed frame; step and reset remain explicit. Manual exports capture that
 displayed state. Complete-model batch export stays deterministic: it captures
 the renderer controls once at batch start, applies them to a hidden viewport,

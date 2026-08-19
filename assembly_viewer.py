@@ -87,6 +87,7 @@ VIEW_MODES = (
     "materials",
     "textured",
     "textured_indexed",
+    "textured_psx_prototype",
 )
 FLAT_TRACY_DESTINATION_MODES = (
     "live_framebuffer",
@@ -110,7 +111,35 @@ INDEXED_EFFECTIVE_RENDERERS = (
     "retail_indexed_reconstructed",
     "retail_indexed_forced_tracy_diagnostic",
 )
-TEXTURED_VIEW_MODES = ("textured", "textured_indexed")
+PSX_PROTOTYPE_VIEW_MODE = "textured_psx_prototype"
+PSX_PROTOTYPE_PROFILE_ID = "psx_prototype_visual_v1"
+PSX_PROTOTYPE_PROFILE_VERSION = 1
+PSX_PROTOTYPE_PROFILE_INFO = {
+    "profile_id": PSX_PROTOTYPE_PROFILE_ID,
+    "profile_version": PSX_PROTOTYPE_PROFILE_VERSION,
+    "source_asset_pipeline": "pc_openua_asset_family",
+    "native_psx_asset_decode": False,
+    "cycle_accurate": False,
+    "texture_interpolation": "affine",
+    "texture_filter": "nearest",
+    "polygon_antialiasing": False,
+    "native_resolution": "unvalidated_not_applied",
+    "fog_draw_distance": "unvalidated_not_applied",
+    "psx_color_semantics": "unvalidated_not_applied",
+    "psx_dithering": "unvalidated_not_applied",
+    "psx_vertex_snapping": "unvalidated_not_applied",
+    "psx_primitive_queues": "unvalidated_not_applied",
+    "scope": (
+        "platform-informed presentation of the loaded PC/OpenUA asset; "
+        "does not decode PSX UNIT.BIN, PW3, GFX, DAT/IND, or prototype "
+        "animation data"
+    ),
+}
+TEXTURED_VIEW_MODES = (
+    "textured",
+    "textured_indexed",
+    PSX_PROTOTYPE_VIEW_MODE,
+)
 VIEW_PRESET_ANGLES = {
     "Front": (0.0, 0.0),
     "Back": (180.0, 0.0),
@@ -2744,6 +2773,15 @@ class AssetViewport(QWidget):
                     self.statusMessage.emit(
                         "Retail indexed renderer unavailable; using OpenUA "
                         f"preview fallback: {self._indexed_unavailable_reason}")
+            elif mode == PSX_PROTOTYPE_VIEW_MODE:
+                # This first profile deliberately changes only the raster
+                # presentation of the already-loaded PC/OpenUA asset.  It is
+                # not a claim that BASE/SKLT/ILBM data became a decoded PSX
+                # UNIT.BIN/PW3 scene merely by selecting another renderer.
+                self.statusMessage.emit(
+                    "PSX prototype visualization active (experimental; "
+                    "PC/OpenUA assets; affine UV, nearest sampling, "
+                    "antialiasing off).")
             self.update()
 
     def _invalidate_last_render_metadata(self) -> None:
@@ -3046,6 +3084,57 @@ class AssetViewport(QWidget):
             info["sources"] = dict(self._indexed_adapter.source_info)
         return info
 
+    @property
+    def renderer_info(self) -> dict:
+        """Return provenance for whichever renderer was requested.
+
+        ``indexed_renderer_info`` remains available for compatibility with
+        older Snapshot Studio integrations.  New consumers should use this
+        renderer-neutral property so an added profile can never be silently
+        classified as the ordinary OpenUA preview.
+        """
+
+        requested = (
+            self._mode
+            if self._last_render_requested_mode == "not_rendered"
+            else self._last_render_requested_mode
+        )
+        effective = self._last_effective_renderer
+        if requested == "textured_indexed" \
+                or effective in INDEXED_EFFECTIVE_RENDERERS:
+            return self.indexed_renderer_info
+        if requested == PSX_PROTOTYPE_VIEW_MODE \
+                or effective == PSX_PROTOTYPE_PROFILE_ID:
+            fallback_used = effective == "openua_preview_fallback"
+            return {
+                "available": True,
+                "resources_available": True,
+                "mode": PSX_PROTOTYPE_PROFILE_ID,
+                "requested_mode": requested,
+                "effective_mode": effective,
+                "fallback_used": fallback_used,
+                "fallback_reason": self._last_render_fallback_reason,
+                "reason": self._last_render_fallback_reason,
+                "background_mode": self._last_render_background,
+                "presentation_background_mode": self._last_render_background,
+                **PSX_PROTOTYPE_PROFILE_INFO,
+            }
+        return {
+            "available": True,
+            "resources_available": True,
+            "mode": "openua_preview",
+            "requested_mode": requested,
+            "effective_mode": effective,
+            "fallback_used": False,
+            "fallback_reason": "",
+            "reason": "",
+            "background_mode": self._last_render_background,
+            "presentation_background_mode": self._last_render_background,
+            "profile_id": "openua_preview",
+            "profile_version": None,
+            "source_asset_pipeline": "pc_openua_asset_family",
+        }
+
     def set_show_sen(self, enabled: bool) -> None:
         self._show_sen = enabled
         self.update()
@@ -3311,6 +3400,16 @@ class AssetViewport(QWidget):
             raise RuntimeError(
                 "Retail indexed snapshot aborted instead of exporting an "
                 f"OpenUA fallback: {reason}")
+        if self._mode == PSX_PROTOTYPE_VIEW_MODE \
+                and self._last_effective_renderer \
+                != PSX_PROTOTYPE_PROFILE_ID:
+            reason = (
+                self._last_render_fallback_reason
+                or "the PSX prototype visualization pass did not complete"
+            )
+            raise RuntimeError(
+                "PSX prototype visualization snapshot aborted instead of "
+                f"exporting a mislabeled fallback: {reason}")
         return image
 
     @staticmethod
@@ -3799,14 +3898,22 @@ class AssetViewport(QWidget):
                       allow_transparent_background: bool = False) -> None:
         """Shared QWidget/QImage renderer; ``clean`` draws model pixels only."""
 
+        mode = self._mode if clean and self._mode in TEXTURED_VIEW_MODES \
+            else ("textured" if clean else self._mode)
+        psx_visual = mode == PSX_PROTOTYPE_VIEW_MODE
+
         # While the camera is actively moving, favor response time over
         # sub-pixel filtering.  Mouse release immediately requests a normal
-        # repaint, so the exact visual quality is restored at rest.
+        # repaint, so the exact visual quality is restored at rest.  The PSX
+        # profile stays hard-edged while idle: smoothing would defeat its
+        # fixed affine/nearest presentation contract.
         camera_preview = self._camera_interacting and not clean
         painter.setRenderHint(
-            QPainter.RenderHint.Antialiasing, not camera_preview)
+            QPainter.RenderHint.Antialiasing,
+            not camera_preview and not psx_visual)
         painter.setRenderHint(
-            QPainter.RenderHint.SmoothPixmapTransform, not camera_preview)
+            QPainter.RenderHint.SmoothPixmapTransform,
+            not camera_preview and not psx_visual)
         if background is not None:
             painter.fillRect(target, background)
         elif not allow_transparent_background:
@@ -3826,8 +3933,6 @@ class AssetViewport(QWidget):
         if self._show_axes and not clean:
             self._draw_axes(painter, target, camera)
 
-        mode = self._mode if clean and self._mode in TEXTURED_VIEW_MODES \
-            else ("textured" if clean else self._mode)
         self._last_render_requested_mode = mode
         if mode != "textured_indexed":
             self._last_indexed_stats = {}
@@ -3841,6 +3946,9 @@ class AssetViewport(QWidget):
                 self._indexed_unavailable_reason
                 if self._indexed_adapter is None else "indexed pass pending"
             )
+        elif mode == PSX_PROTOTYPE_VIEW_MODE:
+            self._last_effective_renderer = PSX_PROTOTYPE_PROFILE_ID
+            self._last_render_fallback_reason = ""
         else:
             self._last_effective_renderer = (
                 "openua_preview" if mode == "textured" else mode)
@@ -4588,7 +4696,9 @@ class AssetViewport(QWidget):
             else:
                 self._draw_textured(painter, screen, uvs, image,
                                     additive=mat.additive,
-                                    camera_vertices=camera_vertices)
+                                    camera_vertices=camera_vertices,
+                                    perspective_correct=(
+                                        mode != PSX_PROTOTYPE_VIEW_MODE))
 
         if draw_wire:
             painter.setPen(QPen(QColor(0, 0, 0, 130), 0.75))
@@ -4631,7 +4741,8 @@ class AssetViewport(QWidget):
     def _draw_textured(self, painter: QPainter, screen: list[QPointF],
                        uvs: list[tuple[int, int]], image: QImage,
                        additive: bool = False,
-                       camera_vertices=None) -> None:
+                       camera_vertices=None,
+                       perspective_correct: bool = True) -> None:
         # Fan triangulation (0, j, j-1), same as the runtime (CONFIRMED).
         # ARGB images honor per-texel alpha (chroma-transparent yellow).
         # Additive = flat-tracy glow faces, approximating the engine's
@@ -4658,7 +4769,7 @@ class AssetViewport(QWidget):
                     tuple((point.x(), point.y()) for point in tri_screen),
                     tri_camera,
                 )
-                if tri_camera is not None else None
+                if perspective_correct and tri_camera is not None else None
             )
             if coefficients is not None \
                     and not _projective_image_transform_is_bounded(
@@ -4678,7 +4789,8 @@ class AssetViewport(QWidget):
             if transform is None:
                 self._draw_degenerate_uv_triangle(
                     painter, tri_screen, tri_uv, image, additive,
-                    tri_camera)
+                    tri_camera,
+                    perspective_correct=perspective_correct)
                 continue
             path = QPainterPath()
             path.moveTo(tri_screen[0])
@@ -4701,7 +4813,8 @@ class AssetViewport(QWidget):
             screen: tuple[QPointF, QPointF, QPointF],
             uvs: tuple[tuple[int, int], tuple[int, int], tuple[int, int]],
             image: QImage, additive: bool,
-            camera_vertices=None) -> None:
+            camera_vertices=None,
+            perspective_correct: bool = True) -> None:
         """Rasterize a screen triangle whose UV triangle is non-invertible.
 
         QPainter's transformed texture path needs an invertible source UV
@@ -4734,7 +4847,7 @@ class AssetViewport(QWidget):
                     QPointF(x + 0.5, y + 0.5), screen)
                 if weights is None:
                     continue
-                if camera_vertices is not None:
+                if perspective_correct and camera_vertices is not None:
                     corrected = [
                         weight / max(
                             _PICK_NEAR_DISTANCE,
