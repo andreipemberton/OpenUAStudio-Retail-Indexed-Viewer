@@ -23,6 +23,7 @@ from editor_widgets import (
     ViewportWidthScrollArea as _ViewportWidthScrollArea,
 )
 from snapshot_studio.batch_export import VPSnapshotBatchPanel
+from snapshot_studio.psx_batch_panel import PsxNativeBatchPanel
 
 
 WINDOW_TITLE = "OpenUAStudio - Snapshot Studio"
@@ -54,17 +55,19 @@ class SnapshotStudioWindow(AssemblyWindow):
         self._set_document_title(None)
         self.statusBar().showMessage(
             "Snapshot Studio: compose one image or export every renderable "
-            "VP and embedded SKLT model. Editing is disabled."
+            "PC VP/embedded SKLT model, or batch native PSX ordinals from "
+            "PSX Archive. Editing is disabled."
         )
 
     def _configure_snapshot_workspace(self) -> None:
-        """Flatten the shared workbench into exactly two primary tabs."""
+        """Expose Snapshot, BAS Manager, and the native PSX archive browser."""
 
         right_tabs = self._right_tabs
         resources_tabs = self._resources_tabs
         visuals_tabs = self._visuals_tabs
         snapshot_panel = self._snapshot_panel
         bas_panel = self._bas_panel
+        psx_panel = self._psx_panel
 
         for tabs in (right_tabs, resources_tabs, visuals_tabs):
             tabs.blockSignals(True)
@@ -76,6 +79,9 @@ class SnapshotStudioWindow(AssemblyWindow):
             bas_index = resources_tabs.indexOf(bas_panel)
             if bas_index >= 0:
                 resources_tabs.removeTab(bas_index)
+            psx_index = resources_tabs.indexOf(psx_panel)
+            if psx_index >= 0:
+                resources_tabs.removeTab(psx_index)
 
             self._detached_resources_tabs = resources_tabs
             self._detached_editor_tabs = self._editor_tabs
@@ -96,9 +102,25 @@ class SnapshotStudioWindow(AssemblyWindow):
             snapshot_scroll.setWidget(snapshot_panel)
             self._snapshot_scroll = snapshot_scroll
 
+            # Native-source inventory, the unmapped roster, and the ordinal
+            # exporter must remain usable together at normal window heights.
+            # Reuse the same width-forcing scroll contract so the PSX page
+            # never introduces a horizontal scrollbar or clips batch controls.
+            psx_scroll = _ViewportWidthScrollArea()
+            psx_scroll.setObjectName("psxArchiveScroll")
+            psx_scroll.setWidgetResizable(True)
+            psx_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            psx_scroll.setHorizontalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            psx_scroll.setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            psx_scroll.setWidget(psx_panel)
+            self._psx_scroll = psx_scroll
+
             right_tabs.clear()
             right_tabs.addTab(snapshot_scroll, "Snapshot")
             right_tabs.addTab(bas_panel, "BAS Manager")
+            right_tabs.addTab(psx_scroll, "PSX Archive")
             right_tabs.setCurrentWidget(snapshot_scroll)
         finally:
             for tabs in (right_tabs, resources_tabs, visuals_tabs):
@@ -221,36 +243,69 @@ class SnapshotStudioWindow(AssemblyWindow):
         self._sync_animation_controls()
 
     def _install_batch_panel(self) -> None:
-        """Add the compact complete-model batch controller."""
+        """Add isolated PC and native-PlayStation batch controllers."""
 
         self.vp_batch_panel = VPSnapshotBatchPanel(self)
+        self.psx_native_batch_panel = PsxNativeBatchPanel(self)
+        # Short alias retained for controller-oriented integrations.
+        self.psx_batch_panel = self.psx_native_batch_panel
         snapshot_layout = self._snapshot_panel.layout()
         snapshot_layout.insertWidget(1, self.vp_batch_panel)
+        self._psx_panel.layout().addWidget(self.psx_native_batch_panel)
         # Recompute the page minimum after the batch controls are inserted.
         # The surrounding QScrollArea will then provide vertical scrolling
         # whenever the window is not tall enough.
         self._snapshot_panel.adjustSize()
+        self._psx_panel.adjustSize()
 
     def open_setbas(self, path: str | Path) -> None:
         super().open_setbas(path)
-        if hasattr(self, "vp_batch_panel"):
-            self.vp_batch_panel.refresh()
+        self._refresh_batch_panels()
 
     def _sync_vp_controls(self) -> None:
         super()._sync_vp_controls()
-        panel = getattr(self, "vp_batch_panel", None)
-        if panel is not None:
-            panel.refresh()
+        self._refresh_batch_panels()
+
+    def _refresh_batch_panels(self) -> None:
+        """Refresh both source-specific controllers when source state moves."""
+
+        for name in ("vp_batch_panel", "psx_native_batch_panel"):
+            panel = getattr(self, name, None)
+            if panel is not None:
+                panel.refresh()
+
+    def _set_psx_build(self, build) -> None:
+        super()._set_psx_build(build)
+        self._refresh_batch_panels()
+
+    def _load_selected_psx_asset(self, *_args) -> None:
+        super()._load_selected_psx_asset(*_args)
+        self._refresh_batch_panels()
+
+    def _on_psx_texture_pack_changed(self, index: int) -> None:
+        super()._on_psx_texture_pack_changed(index)
+        self._refresh_batch_panels()
+
+    def _forget_psx_source(self) -> None:
+        super()._forget_psx_source()
+        self._refresh_batch_panels()
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        panel = getattr(self, "vp_batch_panel", None)
-        if panel is not None and panel.is_running:
-            panel.request_cancel()
+        running = [
+            panel for panel in (
+                getattr(self, "vp_batch_panel", None),
+                getattr(self, "psx_native_batch_panel", None),
+            )
+            if panel is not None and panel.is_running
+        ]
+        if running:
+            for panel in running:
+                panel.request_cancel()
             QMessageBox.information(
                 self,
                 "Snapshot batch in progress",
-                "Cancellation was requested. Wait for the current image "
-                "to finish before closing Snapshot Studio.",
+                "Cancellation was requested. Wait for the current atomic "
+                "image transaction to finish before closing Snapshot Studio.",
             )
             event.ignore()
             return

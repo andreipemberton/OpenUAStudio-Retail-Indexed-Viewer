@@ -1,105 +1,60 @@
-# PSX prototype visualization profile
+# Historical v5 PSX presentation profile
 
-OpenUAStudio's `PSX prototype visualization (experimental)` mode is an
-opt-in presentation profile for a PC/OpenUA asset family that is already
-loaded in the viewer. It exists so affine, hard-edged PlayStation-style image
-behavior can be compared with the normal OpenUA preview without replacing the
-source asset or the retail-indexed renderer.
+This document is retained so v5.0.0 links and historical manifests remain
+understandable. The published v5 profile `psx_prototype_visual_v1` did **not**
+decode PlayStation assets: it applied affine texture mapping, nearest-neighbor
+sampling, and hard polygon edges to a loaded PC/OpenUA `AssetFamily`.
 
-The v1 profile is intentionally narrow. It applies exactly three output
-policies:
+That interpretation did not match the intended feature. Beginning with v6.0.0,
+it is no longer a selectable renderer and is never aliased to native PSX
+output. Its identifiers remain reserved only for legacy manifest and
+output-collision recognition:
 
-- affine texture-coordinate interpolation;
-- nearest-neighbor texture sampling;
-- polygon antialiasing disabled.
+- requested mode: `textured_psx_prototype`;
+- effective/profile ID: `psx_prototype_visual_v1`;
+- source pipeline: `pc_openua_asset_family`.
 
-The mode ID is `textured_psx_prototype`. A completed render reports profile
-and effective-renderer ID `psx_prototype_visual_v1`, profile version `1`, and
-`source_asset_pipeline=pc_openua_asset_family`.
+The corrected implementation is the separate
+[Native PlayStation prototype asset viewer](PSX_NATIVE_ASSET_VIEWER.md). It
+loads native PSW/PSV/PW3 and `UNIT.BIN` geometry from an explicitly selected
+prototype source. Validated native compact and sector-padded `SETnGFX.BIN`
+texture tables are available for explicit operator selection when present;
+topology-only is the default, and no mesh/environment-to-SET affinity is
+inferred. PC/OpenUA assets
+are never substituted. Native parser v3 keeps executable-proven runtime model
+slots separate from dense archive ordinals, counts empty allocation slots only
+in the runtime namespace, and leaves friendly names unmapped.
 
-## What the profile does not claim
+Its PW3 path preserves all four raw file slots and uses the June
+executable-backed packet order, reverse-fan decomposition, and
+bit-14/strict-positive NCLIP decision. PSW/PSV now uses its independently
+recovered packet order `1,0,2,3`, unconditional strict-positive NCLIP, and,
+when a native texture pack is explicitly selected, bounded affine
+direct-grayscale modulation. Its integral signed 16.16 UV component `signed`
+uses the executable-exact material-local quotient
+`q = ((signed >> 16) + (1 if signed < 0 else 0)) >> 1`, sampled directly in
+the selected 128 x 128 payload as a pre-origin `0..127` texel coordinate.
+Descriptor origin and absolute VRAM/wrap equivalence are not inferred. PW3
+direct/tinted shade formulas are recovered, but their effective dispatch
+remains hard-gated. Runtime descriptor TPage/CLUT-offset provenance and
+STP/ABR application remain unresolved for both PSW/PSV and PW3. Both NCLIP
+paths use the viewer's floating projection rather than exact GTE edge-on
+rounding, and exact GPU/GTE helpers remain dormant where the game binding is
+unresolved.
 
-The selected geometry, textures, mappings, and VANM animation remain the
-loaded PC/OpenUA data. This first profile does **not** decode or silently
-reinterpret PlayStation `UNIT.BIN`, PW3, PSW, PSV, `.GFX`, `mhwanh`,
-`DAT`/`IND`, PV2, executable, or overlay data. It is not an emulator and it is
-not cycle-accurate.
+PV2 files are recorded only as strict static, unbound effect inventory, not as
+animation. Only the exact June executable/overlay/asset evidence triplet
+identifies the recovered loose V56B body as a conditional near-view model
+override; it is not animation and is not generalized to other builds. Native
+manual snapshots use
+`psx_native_manual_snapshot_v2`; mesh batches use
+`psx_native_mesh_batch_v2`; snapshot and batch-manifest schemas are v3. These
+PNG/JSON provenance contracts do not reuse the historical v5 PC-profile
+manifest.
 
-The following behaviors remain unvalidated and are not applied by v1:
+The v5 comparison under `docs/psx-prototype-profile-v5/` remains an immutable
+historical release artifact. It must not be described as a PSX asset capture or
+used as evidence for the corrected native renderer.
 
-- a prototype camera, field of view, near/far plane, fog, or draw-distance
-  profile;
-- forced NTSC/PAL native resolution or aspect behavior;
-- PlayStation GTE vertex snapping or fixed-point edge walking;
-- BGR555 framebuffer quantization, texture CLUT/STP/color-zero rules, or ABR
-  semitransparency;
-- PlayStation dithering;
-- FT4, GT4, and F2 primitive queues or ordering-table behavior;
-- prototype-specific mesh, texture, material, animation, or unit-name data.
-
-Those non-claims are recorded directly in `renderer_info` and complete-model
-batch manifests. Manual snapshots carry the distinct v1 filename suggestion
-described below. These are part of the profile contract rather than informal
-caveats.
-
-## Viewer and export behavior
-
-The toolbar and Photo Studio renderer selectors remain synchronized. Selecting
-the PSX profile disables Retail Indexed-only TRACY and AREA distance-fade
-controls without changing their saved values. Returning to Retail Indexed
-restores those configured values.
-
-Manual snapshot suggestions use the `_PSX_PROTO_VISUAL_V1` suffix so an
-experimental PSX-profile image is not confused with an OpenUA or Retail
-Indexed snapshot. A requested PSX snapshot fails closed unless the completed
-renderer identity is exactly `psx_prototype_visual_v1`.
-
-Complete-model batch export records the requested and effective profile,
-profile version, source-asset pipeline, and every applied/non-applied PSX
-policy. `Skip existing` accepts a prior PSX batch only when its profile ID,
-version, and output-affecting policy record match. A later improved profile
-therefore cannot silently reuse v1 output.
-
-## Matched visual comparison
-
-The v5.0.0 documentation includes a
-[matched Hauptstation comparison](docs/psx-prototype-profile-v5/README.md).
-The pair uses the same loaded asset family, camera, animation state, output
-size, and background. Only the renderer mode changes between the normal OpenUA
-preview and `psx_prototype_visual_v1`.
-
-The sheet is composed from two direct 1536 x 1536 viewer renders. It was not
-AI-generated, upscaled, smoothed, or color-graded. The public package preserves
-the comparison PNG, a repository-relative provenance manifest, and exact
-SHA-256 checksums; it excludes the raw game assets and private local paths used
-by the validation environment.
-
-## Evidence-backed next phase
-
-The prototype audit established enough structure for a later, separate,
-read-only PSX asset browser without guessing at game behavior:
-
-- compact PW3 uses an 80-byte little-endian header, signed 32-bit vertices
-  consistent with 16.16 coordinates, and 26-byte face records;
-- each compact face preserves four vertex indices, four UV byte pairs, a raw
-  material/texture selector, and four corner-shade bytes;
-- `UNIT.BIN` stores structurally validated PW3 bodies at 2,048-byte boundaries;
-- `mhwanh` images have a complete indexed RGB-palette representation;
-- sampled `.GFX` images use a 16-word BGR555/STP CLUT and low-nibble-first
-  four-bit indices, although dimensions and runtime alpha behavior are
-  external;
-- `.IND` files provide bounded offsets into heterogeneous `.DAT` records.
-
-That future importer should begin with ordinal, two-sided PW3 topology and raw
-field inspection. Capture-validated texture-page binding, face winding,
-primitive choice, animation, lighting, and blending must precede any claim of
-faithful textured PSX unit rendering.
-
-## Validation boundary
-
-Tests require the PSX mode to remain affine through both the normal transformed
-texture path and the degenerate-UV software fallback, keep antialiasing and
-smooth sampling disabled, produce deterministic snapshots, report the exact
-profile scope, and abort mislabeled snapshot fallbacks. Existing OpenUA
-projective rendering and Retail Indexed canonical outputs remain separate
-regression gates.
+No native PlayStation executable, archive, mesh, texture pack, or other source
+bytes are committed as part of the corrected implementation.

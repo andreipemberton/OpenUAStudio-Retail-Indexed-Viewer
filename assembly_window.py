@@ -83,11 +83,18 @@ from asset_tree_filter import filter_tree as filter_asset_tree
 from assembly_viewer import (
     AssetViewport,
     FLAT_TRACY_DESTINATION_MODES,
-    PSX_PROTOTYPE_VIEW_MODE,
+    PSX_NATIVE_VIEW_MODE,
     TEXTURED_VIEW_MODES,
     VIEW_MODES,
     VIEW_PRESETS,
 )
+from psx_native_assets import (
+    PsxNativeAssetError,
+    PsxNativeBuild,
+    PsxNativeMesh,
+    load_extracted_psx_build,
+)
+from psx_native_textures import PsxNativeTexturePack
 from base_mapping_editor import (
     MappingEditError,
     MappingIndex,
@@ -176,14 +183,29 @@ from vp_manager import (
 )
 
 WINDOW_TITLE = "OpenUAStudio"
-PSX_PROTOTYPE_VIEW_LABEL = (
-    "Textured — PSX prototype visualization (experimental)")
-PSX_PROTOTYPE_SNAPSHOT_LABEL = (
-    "PSX prototype visualization (experimental)")
-PSX_PROTOTYPE_NOTICE = (
-    "Experimental PSX prototype visualization applied to the currently "
-    "loaded PC/OpenUA assets. It does not load PlayStation UNIT.BIN/PW3 "
-    "data and is not cycle-accurate PSX emulation.")
+PSX_NATIVE_VIEW_LABEL = (
+    "PSX prototype assets — native (experimental)")
+PSX_NATIVE_SNAPSHOT_LABEL = "Native PSX assets (experimental)"
+PSX_NATIVE_NOTICE = (
+    "Renders only native PSW/PSV/PW3 geometry read from the selected "
+    "PlayStation prototype source. PC/OpenUA BASE, SKLT, ILBM, VANM, "
+    "SET.BAS, palette, shader, and TRACY data are never used. Validated native "
+    "SETnGFX selector textures are read from that same source only after an "
+    "explicit texture-set selection. Culling for PSW/PSV and PW3 uses the "
+    "recovered raw-corner NCLIP policy (PW3 bit 14 may bypass; PSW/PSV always "
+    "tests), evaluated with the viewer's floating-point projection—not exact "
+    "GTE edge-on rounding. With an explicit SET pack, PSW/PSV may apply the "
+    "recovered material-local/pre-origin UV and grayscale path. Descriptor "
+    "origin, TPage, CLUT offsets, STP/ABR, and absolute VRAM wrapping remain "
+    "unresolved for PSW/PSV and PW3; PW3 shade dispatch/tint is separately "
+    "unresolved. PV2 files are inventoried as static, unbound effect meshes—"
+    "not animation, and native unit animation remains unresolved. V56B "
+    "near-view evidence applies only to the exact recovered June executable/"
+    "OVER1/asset triplet and is not generalized.")
+PSX_NATIVE_ZERO_VISIBLE_HINT = (
+    "No native model pixels are visible in the current view. Native source "
+    "culling remains active; try Back or Bottom, or use Reset camera to Fit "
+    "after moving the view.")
 _BAS_KIND_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 _BAS_NAME_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 
@@ -438,6 +460,10 @@ class AssemblyWindow(QMainWindow):
         self.setWindowTitle(WINDOW_TITLE)
         self.resize(1320, 800)
         self._family: AssetFamily | None = None
+        self._psx_build: PsxNativeBuild | None = None
+        self._psx_selected_mesh: PsxNativeMesh | None = None
+        self._psx_selected_texture_pack: PsxNativeTexturePack | None = None
+        self._pc_view_mode = "textured"
         self._last_directory = Path.home()
         self._last_output_directory: Path | None = None
         self._extra_roots: list[Path] = []
@@ -504,6 +530,7 @@ class AssemblyWindow(QMainWindow):
         self._snapshot_mode_active = False
         self._snapshot_custom_color: QColor | None = None
         self._snapshot_zoom_percent = 100
+        self._native_zero_visible_last: bool | None = None
         self._skip_model_switch_warning = False
         self._bundle_targets: dict[str, tuple[Path, Path]] = {}
         # Last successfully written standalone BASE per owner.  Subsequent
@@ -524,6 +551,10 @@ class AssemblyWindow(QMainWindow):
         self.viewport.statusMessage.connect(
             lambda text: self._notify(text, 4500)
         )
+        self._native_visibility_timer = QTimer(self)
+        self._native_visibility_timer.setSingleShot(True)
+        self._native_visibility_timer.timeout.connect(
+            self._show_native_visibility_hint_if_needed)
         self.viewport.polygonPickedDetailed.connect(self._on_polygon_picked)
         self.viewport.polygonStructurePicked.connect(
             self._on_polygon_structure_picked)
@@ -663,6 +694,63 @@ class AssemblyWindow(QMainWindow):
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setbas_label = QLabel("No SET.BAS loaded.")
         self.setbas_label.setWordWrap(True)
+        self.psx_source_label = QLabel("No PlayStation source selected.")
+        self.psx_source_label.setWordWrap(True)
+        self.psx_source_button = QPushButton(
+            "Open Extracted PSX Disc Folder...")
+        self.psx_source_button.clicked.connect(self.open_psx_source_dialog)
+        self.psx_forget_button = QPushButton("Forget Source")
+        self.psx_forget_button.setEnabled(False)
+        self.psx_forget_button.clicked.connect(self._forget_psx_source)
+        self.psx_texture_set_combo = QComboBox()
+        self.psx_texture_set_combo.setEnabled(False)
+        self.psx_texture_set_combo.setToolTip(
+            "Choose one validated native SET1GFX..SET6GFX environmental "
+            "texture table from the active PlayStation build. The viewer "
+            "recognizes separate validated layouts. Recovered executables "
+            "select SET packs by level/environment; no mesh-inherent SET "
+            "affinity is inferred. Selection resolves the selector table "
+            "only; descriptor origin, TPage, CLUT offsets, STP/ABR, and "
+            "absolute VRAM wrapping remain unresolved for PSW/PSV and PW3.")
+        self.psx_texture_set_combo.currentIndexChanged.connect(
+            self._on_psx_texture_pack_changed)
+        self.psx_asset_tree = QTreeWidget()
+        self.psx_asset_tree.setHeaderLabels([
+            "Native asset / runtime slot", "Format", "Offset/sector",
+            "Vertices", "Faces"
+        ])
+        self.psx_asset_tree.setRootIsDecorated(False)
+        self.psx_asset_tree.setUniformRowHeights(True)
+        self.psx_asset_tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
+        self.psx_asset_tree.itemDoubleClicked.connect(
+            self._load_selected_psx_asset)
+        self.psx_load_button = QPushButton("Load Selected Native Asset")
+        self.psx_load_button.setEnabled(False)
+        self.psx_load_button.clicked.connect(
+            self._load_selected_psx_asset)
+        self.psx_asset_tree.currentItemChanged.connect(
+            lambda current, _previous: self.psx_load_button.setEnabled(
+                current is not None and current.data(
+                    0, Qt.ItemDataRole.UserRole) is not None))
+        self.psx_effect_list = QListWidget()
+        self.psx_effect_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection)
+        self.psx_effect_list.setMaximumHeight(125)
+        self.psx_effect_list.setToolTip(
+            "Strictly parsed 352-byte PV2 static effect meshes. These are "
+            "real native PSX assets, but no recovered record proves timing, "
+            "playback, attachment, model-slot binding, or translation "
+            "application, so the viewer inventories rather than animates "
+            "them.")
+        self.psx_roster_list = QListWidget()
+        self.psx_roster_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection)
+        self.psx_roster_list.setMaximumHeight(125)
+        self.psx_roster_list.setToolTip(
+            "Source-authored VEHICLE.TXT lines. They are shown for research "
+            "but are not assigned to executable-proven model slots without a "
+            "separate friendly-name map.")
         self.poly_uv_label = QLabel("Select a polygon in the viewport.")
         self.poly_uv_label.setMinimumHeight(200)
         self.fx_combo = QComboBox()
@@ -1017,11 +1105,15 @@ class AssemblyWindow(QMainWindow):
         self.open_ilbm_action.triggered.connect(self.open_ilbm_dialog)
         self.open_family_action = QAction("Import Asset Family", self)
         self.open_family_action.triggered.connect(self.open_family_dialog)
+        self.open_psx_action = QAction(
+            "Open PlayStation Prototype Assets...", self)
+        self.open_psx_action.triggered.connect(self.open_psx_source_dialog)
 
         self.file_import_menu = file_menu.addMenu("Import")
         for action in (
                 self.open_base_action, self.open_sklt_action,
-                self.open_ilbm_action, self.open_family_action):
+                self.open_ilbm_action, self.open_family_action,
+                self.open_psx_action):
             self.file_import_menu.addAction(action)
 
         self.save_asset_family_action = QAction("Export Asset Family", self)
@@ -1258,13 +1350,13 @@ class AssemblyWindow(QMainWindow):
                      "textured": "Textured — OpenUA preview",
                      "textured_indexed":
                          "Textured — Retail indexed (reconstructed)",
-                     PSX_PROTOTYPE_VIEW_MODE:
-                         PSX_PROTOTYPE_VIEW_LABEL}[mode]
+                     PSX_NATIVE_VIEW_MODE:
+                         PSX_NATIVE_VIEW_LABEL}[mode]
             self.mode_combo.addItem(label, mode)
-            if mode == PSX_PROTOTYPE_VIEW_MODE:
+            if mode == PSX_NATIVE_VIEW_MODE:
                 self.mode_combo.setItemData(
                     self.mode_combo.count() - 1,
-                    PSX_PROTOTYPE_NOTICE,
+                    PSX_NATIVE_NOTICE,
                     Qt.ItemDataRole.ToolTipRole,
                 )
         self.mode_combo.setCurrentIndex(
@@ -1283,6 +1375,7 @@ class AssemblyWindow(QMainWindow):
             self._on_toolbar_view_preset_changed)
         self.viewport.manualCameraChanged.connect(
             self._on_manual_camera_changed)
+        self.viewport.viewportResized.connect(self._on_viewport_resized)
         toolbar.addWidget(self.toolbar_view_preset_combo)
 
         # Animation controls (enabled only when a VANM is loaded)
@@ -1778,18 +1871,18 @@ class AssemblyWindow(QMainWindow):
         self.snapshot_renderer_combo.addItem(
             "Retail indexed (reconstructed)", "textured_indexed")
         self.snapshot_renderer_combo.addItem(
-            PSX_PROTOTYPE_SNAPSHOT_LABEL, PSX_PROTOTYPE_VIEW_MODE)
+            PSX_NATIVE_SNAPSHOT_LABEL, PSX_NATIVE_VIEW_MODE)
         self.snapshot_renderer_combo.setItemData(
             self.snapshot_renderer_combo.count() - 1,
-            PSX_PROTOTYPE_NOTICE,
+            PSX_NATIVE_NOTICE,
             Qt.ItemDataRole.ToolTipRole,
         )
         self.snapshot_renderer_combo.currentIndexChanged.connect(
             self._on_snapshot_renderer_changed)
         view_layout.addWidget(self.snapshot_renderer_combo, 1, 1)
-        self.snapshot_renderer_notice = QLabel(PSX_PROTOTYPE_NOTICE)
+        self.snapshot_renderer_notice = QLabel(PSX_NATIVE_NOTICE)
         self.snapshot_renderer_notice.setWordWrap(True)
-        self.snapshot_renderer_notice.setToolTip(PSX_PROTOTYPE_NOTICE)
+        self.snapshot_renderer_notice.setToolTip(PSX_NATIVE_NOTICE)
         self.snapshot_renderer_notice.setStyleSheet(
             "color: #d6b66b; padding: 2px 0;")
         self.snapshot_renderer_notice.setVisible(False)
@@ -2001,6 +2094,48 @@ class AssemblyWindow(QMainWindow):
         resolve_buttons.addWidget(self.unload_button, 1, 1)
         resolve_layout.addLayout(resolve_buttons)
 
+        psx_panel = QWidget()
+        psx_layout = QVBoxLayout(psx_panel)
+        psx_layout.setContentsMargins(5, 5, 5, 5)
+        psx_layout.setSpacing(5)
+        psx_layout.addWidget(self.psx_source_label)
+        psx_source_buttons = QHBoxLayout()
+        psx_source_buttons.addWidget(self.psx_source_button, 1)
+        psx_source_buttons.addWidget(self.psx_forget_button)
+        psx_layout.addLayout(psx_source_buttons)
+        psx_notice = QLabel(PSX_NATIVE_NOTICE)
+        psx_notice.setWordWrap(True)
+        psx_notice.setStyleSheet("color: #d6b66b; padding: 2px 0;")
+        psx_layout.addWidget(psx_notice)
+        psx_texture_row = QHBoxLayout()
+        psx_texture_row.addWidget(QLabel("Native texture set:"))
+        psx_texture_row.addWidget(self.psx_texture_set_combo, 1)
+        psx_layout.addLayout(psx_texture_row)
+        psx_layout.addWidget(self.psx_asset_tree, 1)
+        psx_layout.addWidget(self.psx_load_button)
+        psx_effect_box = QGroupBox("Native PV2 static effects — unbound")
+        psx_effect_layout = QVBoxLayout(psx_effect_box)
+        psx_effect_layout.setContentsMargins(5, 5, 5, 5)
+        psx_effect_layout.addWidget(self.psx_effect_list)
+        psx_effect_notice = QLabel(
+            "These recovered H/V effect meshes are archived exactly, but "
+            "they are not treated as unit animation. Timing, attachment, "
+            "playback, and translation use remain unresolved.")
+        psx_effect_notice.setWordWrap(True)
+        psx_effect_layout.addWidget(psx_effect_notice)
+        psx_layout.addWidget(psx_effect_box)
+        psx_roster_box = QGroupBox("Native VEHICLE.TXT roster — unmapped")
+        psx_roster_layout = QVBoxLayout(psx_roster_box)
+        psx_roster_layout.setContentsMargins(5, 5, 5, 5)
+        psx_roster_layout.addWidget(self.psx_roster_list)
+        psx_roster_notice = QLabel(
+            "Exact prototype executables can prove numeric UNIT.BIN model "
+            "slots, including gaps. VEHICLE.TXT remains a separate unmapped "
+            "friendly-name roster and is never used to guess those names.")
+        psx_roster_notice.setWordWrap(True)
+        psx_roster_layout.addWidget(psx_roster_notice)
+        psx_layout.addWidget(psx_roster_box)
+
         def category_tabs() -> QTabWidget:
             category = QTabWidget()
             category.setDocumentMode(True)
@@ -2028,6 +2163,7 @@ class AssemblyWindow(QMainWindow):
 
         resources_tabs = category_tabs()
         resources_tabs.addTab(setbas_panel, "Bas Manager")
+        resources_tabs.addTab(psx_panel, "PSX Archive")
         resources_tabs.addTab(asset_panel, "Assets")
         resources_tabs.addTab(resolve_panel, "Dependencies")
 
@@ -2055,6 +2191,7 @@ class AssemblyWindow(QMainWindow):
         self._right_tabs = tabs
         self._setbas_panel = resources_tabs
         self._bas_panel = setbas_panel
+        self._psx_panel = psx_panel
         self._resources_tabs = resources_tabs
         self._assets_panel = asset_panel
         self._editor_tabs = editor_tabs
@@ -2437,6 +2574,457 @@ class AssemblyWindow(QMainWindow):
             self.open_setbas(source)
         else:
             self.open_base(source)
+
+    def _sync_renderer_selectors(self, mode: str) -> None:
+        """Keep the toolbar and Snapshot renderer on one effective source."""
+
+        for combo in (self.mode_combo, self.snapshot_renderer_combo):
+            index = combo.findData(mode)
+            if index < 0:
+                continue
+            combo.blockSignals(True)
+            combo.setCurrentIndex(index)
+            combo.blockSignals(False)
+
+    def _synchronize_camera_after_source_activation(
+            self, *, keep_camera: bool = False) -> bool:
+        """Make camera controls truthful after one successful scene load."""
+
+        if keep_camera:
+            return False
+        if self._snapshot_mode_active:
+            if not self.viewport.commit_snapshot_source_activation():
+                return False
+            # Snapshot's preset remains independently authoritative while the
+            # regular toolbar records the newly committed post-exit baseline.
+            # Do not leave an old toolbar name that cannot be re-selected.
+            self.toolbar_view_preset_combo.blockSignals(True)
+            self.toolbar_view_preset_combo.setCurrentText("Current View")
+            self.toolbar_view_preset_combo.blockSignals(False)
+            # Reapply both cases. Current View now points at the freshly fitted
+            # source and its callback also resets stale Snapshot zoom controls
+            # to 100%; a named preset remains independently authoritative.
+            self._on_snapshot_preset_changed(
+                self.snapshot_view_combo.currentText())
+        else:
+            # A normal source load resets/fits the scene. Do not leave an old
+            # named toolbar preset displayed when selecting it again would emit
+            # no signal and therefore fail to apply that view.
+            self.toolbar_view_preset_combo.blockSignals(True)
+            self.toolbar_view_preset_combo.setCurrentText("Current View")
+            self.toolbar_view_preset_combo.blockSignals(False)
+            self._sync_camera_dependent_ui()
+        return True
+
+    def _restore_pc_or_empty_viewport(self, *, keep_camera: bool = False) \
+            -> str:
+        """Leave a native scene without retaining a PSX renderer identity."""
+
+        self._native_visibility_timer.stop()
+        self._native_zero_visible_last = None
+        if self._family is not None:
+            visible = self._family_descendants(
+                self._family, self._selected_owner)
+            self.viewport.load_family(
+                self._family,
+                visible_owners=visible,
+                keep_camera=keep_camera,
+                primary_owner=self._selected_owner,
+            )
+            mode = self._pc_view_mode
+            self.viewport.set_mode(mode)
+            title_path = self._family.base_path or self._family.setbas_path
+            self._set_document_title(title_path)
+            self._synchronize_camera_after_source_activation(
+                keep_camera=keep_camera)
+        else:
+            self.viewport.clear()
+            mode = "textured"
+            self.viewport.set_mode(mode)
+            self._set_document_title(None)
+            # Clearing the last source also replaces the active scene.  Reset
+            # camera availability and source-derived visibility state just as
+            # rigorously as a successful PC/native load; otherwise an enabled
+            # Reset action from the previous camera can survive over an empty
+            # viewport.
+            self._sync_camera_dependent_ui()
+        self._sync_renderer_selectors(mode)
+        self._set_object_info(["No asset selected."])
+        return mode
+
+    def open_psx_source_dialog(self) -> None:
+        """Choose one extracted PlayStation disc tree explicitly."""
+
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Open extracted Urban Assault PlayStation prototype disc",
+            str(self._last_directory),
+        )
+        if path:
+            self.open_psx_source(path)
+
+    def open_psx_source(self, path: str | Path) -> None:
+        """Load and inventory native assets without consulting PC roots."""
+
+        try:
+            build = load_extracted_psx_build(Path(path))
+        except (PsxNativeAssetError, OSError) as exc:
+            QMessageBox.warning(
+                self,
+                "Not a supported Urban Assault PlayStation source",
+                "The selected source does not contain SYSTEM.CNF, a valid "
+                "PS-X executable, and supported UNITMODL assets in one "
+                f"filesystem. Nothing was loaded.\n\n{exc}",
+            )
+            self._notify("Native PSX source was not loaded.", 6000)
+            return
+        self._last_directory = build.root
+        self._set_psx_build(build)
+
+    def _set_psx_build(self, build: PsxNativeBuild) -> None:
+        # Replacing a library is an atomic source transition.  Never publish
+        # build B in the archive panel while build A's native mesh remains in
+        # the viewport or snapshot renderer provenance.
+        if self.viewport.source_kind == "psx_native":
+            self._restore_pc_or_empty_viewport()
+        self._psx_build = build
+        self._psx_selected_mesh = None
+        self._psx_selected_texture_pack = None
+        self.psx_texture_set_combo.blockSignals(True)
+        self.psx_texture_set_combo.clear()
+        if build.texture_packs:
+            self.psx_texture_set_combo.addItem(
+                "Topology only — choose a native texture set", None)
+            self.psx_texture_set_combo.setItemData(
+                0,
+                "No texture pack is associated automatically with a packed "
+                "model slot. Choose a SETnGFX environment explicitly; no "
+                "PC texture will be substituted.",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+            for pack in build.texture_packs:
+                label = Path(pack.logical_path).name
+                self.psx_texture_set_combo.addItem(label, pack)
+                self.psx_texture_set_combo.setItemData(
+                    self.psx_texture_set_combo.count() - 1,
+                    f"{pack.logical_path}\nSHA-256: {pack.source_sha256}\n"
+                    f"Validated layout: {pack.layout_id}\n"
+                    "Selector mapping: "
+                    f"{pack.selector_to_pixel_bank_mapping}\n"
+                    f"Populated material slots: {pack.material_slot_count}/128\n"
+                    "128 x 128 low-nibble-first 4bpp. The mesh/environment "
+                    "association is your explicit selection, not an inferred "
+                    "model binding. Descriptor origin, TPage, CLUT offsets, "
+                    "STP/ABR, and absolute VRAM wrapping remain unresolved "
+                    "for PSW/PSV and PW3.",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+            self.psx_texture_set_combo.setCurrentIndex(0)
+            self.psx_texture_set_combo.setEnabled(True)
+        else:
+            self.psx_texture_set_combo.addItem(
+                "Topology only — no validated texture set available", None)
+            self.psx_texture_set_combo.setEnabled(False)
+        self.psx_texture_set_combo.blockSignals(False)
+        self.psx_asset_tree.clear()
+        self.psx_effect_list.clear()
+        self.psx_roster_list.clear()
+        for line_number, authored_name in enumerate(
+                build.vehicle_roster, start=1):
+            self.psx_roster_list.addItem(
+                f"line {line_number:02d}: {authored_name}")
+        for mesh in build.meshes:
+            if mesh.archive_ordinal is not None:
+                name = (
+                    f"model slot {mesh.model_slot:03d} "
+                    f"(dense ordinal {mesh.archive_ordinal:03d})"
+                    if mesh.model_slot is not None else
+                    f"UNIT.BIN dense ordinal {mesh.archive_ordinal:03d} "
+                    "(runtime slot unproven)"
+                )
+                location = (
+                    f"0x{mesh.archive_offset:08X} / "
+                    f"sector {mesh.archive_sector}")
+            else:
+                name = mesh.logical_path
+                location = "loose native file"
+            item = QTreeWidgetItem([
+                name,
+                f"{mesh.format_id} v{mesh.format_version}",
+                location,
+                str(len(mesh.vertices)),
+                str(len(mesh.faces)),
+            ])
+            item.setData(0, Qt.ItemDataRole.UserRole, mesh)
+            item.setToolTip(
+                0,
+                f"Native body SHA-256: {mesh.body_sha256}\n"
+                + (
+                    f"Runtime model slot: {mesh.model_slot}\n"
+                    f"Evidence: {mesh.model_slot_evidence_id}\n"
+                    f"Legacy dense ordinal: {mesh.archive_ordinal}\n"
+                    if mesh.model_slot is not None else
+                    "Runtime model slot: unavailable/unproven\n"
+                    if mesh.archive_ordinal is not None else
+                    "Runtime model slot: loose filename is not a slot map\n"
+                )
+                + (
+                    "Validated native SETnGFX selector tables are available "
+                    "for explicit operator selection; no mesh/environment "
+                    "pack affinity is inferred"
+                    if build.texture_packs else
+                    "Texture binding: unavailable_not_substituted"
+                )
+                + (
+                    "\nV56B near-view override evidence: exact recovered "
+                    "June executable/OVER1/asset triplet only; not "
+                    "generalized to other builds or same-named assets."
+                    if Path(
+                        mesh.logical_path.replace("\\", "/")
+                    ).name.casefold() == "v56b.pw3" else ""
+                ),
+            )
+            self.psx_asset_tree.addTopLevelItem(item)
+        for effect in build.effects:
+            item = QListWidgetItem(
+                f"{effect.logical_path} | {len(effect.vertices)} vertices | "
+                f"{len(effect.faces)} faces")
+            item.setToolTip(
+                f"Format: {effect.format_id} v{effect.format_version}\n"
+                f"Binding: {effect.binding_status}\n"
+                f"Source SHA-256: {effect.source_sha256}\n"
+                f"Vertex stream SHA-256: {effect.vertex_stream_sha256}\n"
+                f"Face stream SHA-256: {effect.face_stream_sha256}\n"
+                "Static native effect inventory only; timing, attachment, "
+                "playback, model-slot relation, and translation application "
+                "are not inferred.")
+            self.psx_effect_list.addItem(item)
+        for column in range(self.psx_asset_tree.columnCount()):
+            self.psx_asset_tree.resizeColumnToContents(column)
+        archive = (
+            build.unit_archive_sha256[:12]
+            if build.unit_archive_sha256 else "loose-PSW")
+        model_slot_status = (
+            "runtime model slots proven | "
+            if build.model_slot_evidence is not None else
+            "runtime model slots unavailable/unproven | "
+        )
+        self.psx_source_label.setText(
+            f"PlayStation source ready: {build.boot_executable_logical_path} "
+            f"| {len(build.meshes)} native mesh(es) | "
+            f"{len(build.effects)} PV2 static effect(s) | "
+            f"{len(build.texture_packs)} validated texture set(s) | "
+            f"{model_slot_status}"
+            f"source {archive}…")
+        self.psx_forget_button.setEnabled(True)
+        self.psx_load_button.setEnabled(False)
+        self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
+        self._sync_animation_controls()
+        batch_panel = getattr(self, "vp_batch_panel", None)
+        if batch_panel is not None:
+            batch_panel.refresh()
+        self._notify(
+            f"Indexed {len(build.meshes)} native PlayStation mesh(es) and "
+            f"{len(build.effects)} unbound PV2 static effect(s). "
+            "Choose a model slot, dense-ordinal fallback, or loose file to "
+            "render.",
+            8000,
+        )
+
+    def _activate_selected_psx_asset(
+            self, mesh: PsxNativeMesh | None = None, *,
+            force_reload: bool = False,
+            keep_camera: bool = False) -> None:
+        """Atomically activate the exact selected native source identity.
+
+        Native mode can be entered from the archive load button or either
+        renderer selector.  Keeping this transition in one place prevents a
+        native viewport from being presented under a stale PC title/object
+        identity (or vice versa), and prevents a changed selection from being
+        paired with the previously loaded mesh or texture pack.
+        """
+
+        build = self._psx_build
+        selected_mesh = mesh if mesh is not None else self._psx_selected_mesh
+        texture_pack = self._psx_selected_texture_pack
+        if not isinstance(build, PsxNativeBuild) \
+                or not isinstance(selected_mesh, PsxNativeMesh):
+            raise RuntimeError(
+                "No PlayStation source/mesh is selected. Open the PSX "
+                "Archive tab and load a native asset first.")
+        selection_valid = bool(
+            (
+                texture_pack is None
+                or isinstance(texture_pack, PsxNativeTexturePack)
+            )
+            and any(candidate is selected_mesh for candidate in build.meshes)
+            and (
+                texture_pack is None
+                or any(candidate is texture_pack
+                       for candidate in build.texture_packs)
+            )
+            and self.psx_texture_set_combo.currentData() is texture_pack
+        )
+        if not selection_valid:
+            raise RuntimeError(
+                "The selected PlayStation build, mesh, and texture pack no "
+                "longer form one exact native source identity. Reload the "
+                "source and select the asset again.")
+
+        scene_matches = bool(
+            self.viewport.source_kind == "psx_native"
+            and getattr(self.viewport, "_psx_build", None) is build
+            and self.viewport.psx_mesh is selected_mesh
+            and self.viewport.psx_texture_pack is texture_pack
+        )
+        reloaded = False
+        if force_reload or not scene_matches:
+            try:
+                self.viewport.load_psx_mesh(
+                    build,
+                    selected_mesh,
+                    texture_pack=texture_pack,
+                    keep_camera=keep_camera,
+                )
+                reloaded = True
+            except (TypeError, ValueError, RuntimeError) as exc:
+                raise RuntimeError(str(exc)) from exc
+        if reloaded and not keep_camera:
+            # Snapshot Studio is persistent: its entry-time Current View can
+            # predate any loaded model. Replace that stale baseline with the
+            # newly fitted native camera and exit state before a caller
+            # reapplies the selected Snapshot preset.
+            self._synchronize_camera_after_source_activation()
+        # When the exact scene is already active (for example, returning from
+        # native wireframe/solid), changing only the renderer preserves the
+        # operator's camera instead of reloading and fitting the mesh again.
+        self.viewport.set_mode(PSX_NATIVE_VIEW_MODE)
+        self._psx_selected_mesh = selected_mesh
+        self._native_zero_visible_last = None
+        self._sync_renderer_selectors(PSX_NATIVE_VIEW_MODE)
+        self._set_document_title(build.root)
+        self._set_object_info([
+            "Source: native PlayStation prototype asset",
+            f"Asset: {selected_mesh.label}",
+            f"Body SHA-256: {selected_mesh.body_sha256}",
+            (
+                f"Runtime identity: model slot {selected_mesh.model_slot}; "
+                f"legacy dense ordinal {selected_mesh.archive_ordinal}; "
+                "friendly name unmapped"
+                if selected_mesh.model_slot is not None else
+                f"Runtime identity: unproven; dense archive ordinal "
+                f"{selected_mesh.archive_ordinal}; friendly name unmapped"
+                if selected_mesh.archive_ordinal is not None else
+                "Runtime identity: loose native filename only; model slot "
+                "unverified"
+            ),
+            (
+                "Texture table: validated native SETnGFX; "
+                "mesh/environment association: operator selected | "
+                f"{texture_pack.logical_path} | "
+                f"{texture_pack.layout_id}"
+                if texture_pack is not None
+                else (
+                    "Texture mode: topology only; validated native SETnGFX "
+                    "packs are available for explicit selection and no "
+                    "mesh/environment affinity is inferred"
+                    if build.texture_packs else
+                    "Texture binding: unavailable; no PC texture substituted"
+                )
+            ),
+        ])
+        self._schedule_native_visibility_hint(0)
+
+    def _load_selected_psx_asset(self, *_args) -> None:
+        item = self.psx_asset_tree.currentItem()
+        mesh = (
+            item.data(0, Qt.ItemDataRole.UserRole)
+            if item is not None else None)
+        if not isinstance(mesh, PsxNativeMesh) or self._psx_build is None:
+            self._notify("Select a native PSX mesh first.", 4500)
+            return
+        try:
+            self._activate_selected_psx_asset(mesh, force_reload=True)
+        except RuntimeError as exc:
+            self._notify(f"Native PSX asset was not loaded: {exc}", 8000)
+            return
+        self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
+        self._sync_animation_controls()
+        batch_panel = getattr(self, "vp_batch_panel", None)
+        if batch_panel is not None:
+            batch_panel.refresh()
+
+    def _on_psx_texture_pack_changed(self, _index: int) -> None:
+        pack = self.psx_texture_set_combo.currentData()
+        candidate = pack if isinstance(pack, PsxNativeTexturePack) else None
+        if self.viewport.source_kind != "psx_native" \
+                or self._psx_selected_mesh is None \
+                or self._psx_build is None:
+            self._psx_selected_texture_pack = candidate
+            return
+        previous = self._psx_selected_texture_pack
+        self._psx_selected_texture_pack = candidate
+        try:
+            self._activate_selected_psx_asset(
+                force_reload=True, keep_camera=True)
+        except RuntimeError as exc:
+            self._psx_selected_texture_pack = previous
+            previous_index = self.psx_texture_set_combo.findData(previous)
+            self.psx_texture_set_combo.blockSignals(True)
+            self.psx_texture_set_combo.setCurrentIndex(
+                max(0, previous_index))
+            self.psx_texture_set_combo.blockSignals(False)
+            self._notify(
+                f"Native texture-set change was refused: {exc}", 8000)
+            return
+        # Geometry is unchanged and the native reload above restores the exact
+        # camera. Reapplying Snapshot's saved "Current View" here would
+        # overwrite that preserved operator camera with an older entry state.
+        self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
+        self._sync_animation_controls()
+        batch_panel = getattr(self, "vp_batch_panel", None)
+        if batch_panel is not None:
+            batch_panel.refresh()
+
+    def _forget_psx_source(self) -> None:
+        was_active = self.viewport.source_kind == "psx_native"
+        self._psx_build = None
+        self._psx_selected_mesh = None
+        self._psx_selected_texture_pack = None
+        self.psx_asset_tree.clear()
+        self.psx_effect_list.clear()
+        self.psx_roster_list.clear()
+        self.psx_texture_set_combo.blockSignals(True)
+        self.psx_texture_set_combo.clear()
+        self.psx_texture_set_combo.blockSignals(False)
+        self.psx_texture_set_combo.setEnabled(False)
+        self.psx_source_label.setText("No PlayStation source selected.")
+        self.psx_forget_button.setEnabled(False)
+        self.psx_load_button.setEnabled(False)
+        if was_active:
+            self._restore_pc_or_empty_viewport()
+        elif self._family is not None:
+            self._set_document_title(
+                self._family.base_path or self._family.setbas_path)
+        else:
+            self._set_document_title(None)
+        # Forgetting the native source is a source transition, not merely a
+        # tree clear.  Synchronize every source-sensitive control so no PSX
+        # renderer identity remains selected over an empty/PC viewport.
+        self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
+        self._sync_animation_controls()
+        batch_panel = getattr(self, "vp_batch_panel", None)
+        if batch_panel is not None:
+            batch_panel.refresh()
+        self._notify("PlayStation source forgotten; no source file changed.")
 
     def open_base_dialog(self) -> None:
         """Backward-compatible standalone BASE importer."""
@@ -4198,7 +4786,34 @@ class AssemblyWindow(QMainWindow):
 
     def _on_view_mode_changed(self, _index: int) -> None:
         mode = self.mode_combo.currentData()
-        self.viewport.set_mode(mode)
+        prior_mode = self.viewport.view_mode
+        try:
+            if mode == PSX_NATIVE_VIEW_MODE:
+                self._activate_selected_psx_asset()
+            elif mode in {"textured", "textured_indexed"}:
+                if self.viewport.source_kind == "psx_native":
+                    if self._family is None:
+                        raise RuntimeError(
+                            "No PC/OpenUA AssetFamily is loaded. Open a BASE "
+                            "or SET.BAS asset before selecting this renderer.")
+                    # A renderer selection is also a source transition.  Use
+                    # the common restoration path so the window title, object
+                    # provenance, native visibility hint, selected subtree,
+                    # and both renderer selectors cannot retain PSX state over
+                    # a PC/OpenUA viewport.
+                    self._pc_view_mode = mode
+                    self._restore_pc_or_empty_viewport()
+                else:
+                    self._pc_view_mode = mode
+            self.viewport.set_mode(mode)
+        except RuntimeError as exc:
+            restore_index = self.mode_combo.findData(prior_mode)
+            if restore_index >= 0:
+                self.mode_combo.blockSignals(True)
+                self.mode_combo.setCurrentIndex(restore_index)
+                self.mode_combo.blockSignals(False)
+            self._notify(str(exc), 8000)
+            return
         if mode in TEXTURED_VIEW_MODES:
             renderer_index = self.snapshot_renderer_combo.findData(mode)
             if renderer_index >= 0:
@@ -4208,6 +4823,13 @@ class AssemblyWindow(QMainWindow):
         self._update_flat_tracy_destination_controls()
         self._update_retail_area_distance_fade_control()
         self._update_psx_prototype_renderer_notice()
+        self._sync_animation_controls()
+        if self._snapshot_mode_active:
+            self._on_snapshot_preset_changed(
+                self.snapshot_view_combo.currentText())
+        batch_panel = getattr(self, "vp_batch_panel", None)
+        if batch_panel is not None:
+            batch_panel.refresh()
         if mode != "textured_indexed":
             self._notify(
                 f"Viewport mode changed to {self.mode_combo.currentText()}.",
@@ -4219,7 +4841,53 @@ class AssemblyWindow(QMainWindow):
         mode = self.snapshot_renderer_combo.currentData()
         if mode not in TEXTURED_VIEW_MODES:
             return
-        self.viewport.set_mode(mode)
+        prior_mode = self.viewport.view_mode
+        prior_source_kind = self.viewport.source_kind
+        prior_pc_view_mode = self._pc_view_mode
+        try:
+            if mode == PSX_NATIVE_VIEW_MODE:
+                self._activate_selected_psx_asset()
+            else:
+                if self.viewport.source_kind == "psx_native":
+                    if self._family is None:
+                        raise RuntimeError(
+                            "No PC/OpenUA AssetFamily is loaded for the "
+                            "selected snapshot renderer.")
+                    # Keep source identity and its presentation state atomic:
+                    # leaving native PSX mode must restore every PC-facing UI
+                    # field, not only replace the viewport's geometry.
+                    self._pc_view_mode = mode
+                    self._restore_pc_or_empty_viewport()
+                else:
+                    self._pc_view_mode = mode
+            self.viewport.set_mode(mode)
+        except RuntimeError as exc:
+            self._pc_view_mode = prior_pc_view_mode
+            # The Snapshot selector has no wireframe/materials entries, so
+            # restoring it from the viewport mode can leave a refused PSX/PC
+            # renderer visibly selected.  Derive its truthful value from the
+            # source that remained active; independently restore the toolbar
+            # to the untouched viewport mode.
+            source_renderer = (
+                PSX_NATIVE_VIEW_MODE
+                if prior_source_kind == "psx_native"
+                else (
+                    prior_pc_view_mode
+                    if prior_pc_view_mode in {"textured", "textured_indexed"}
+                    else "textured"
+                )
+            )
+            for combo, restore_mode in (
+                    (self.snapshot_renderer_combo, source_renderer),
+                    (self.mode_combo, prior_mode)):
+                restore_index = combo.findData(restore_mode)
+                if restore_index < 0:
+                    continue
+                combo.blockSignals(True)
+                combo.setCurrentIndex(restore_index)
+                combo.blockSignals(False)
+            self._notify(str(exc), 8000)
+            return
         toolbar_index = self.mode_combo.findData(mode)
         if toolbar_index >= 0:
             self.mode_combo.blockSignals(True)
@@ -4228,6 +4896,13 @@ class AssemblyWindow(QMainWindow):
         self._update_flat_tracy_destination_controls()
         self._update_retail_area_distance_fade_control()
         self._update_psx_prototype_renderer_notice()
+        self._sync_animation_controls()
+        if self._snapshot_mode_active:
+            self._on_snapshot_preset_changed(
+                self.snapshot_view_combo.currentText())
+        batch_panel = getattr(self, "vp_batch_panel", None)
+        if batch_panel is not None:
+            batch_panel.refresh()
         if mode != "textured_indexed":
             self._notify(
                 f"Snapshot renderer changed to "
@@ -4268,22 +4943,51 @@ class AssemblyWindow(QMainWindow):
             checkbox.blockSignals(False)
 
     def _update_psx_prototype_renderer_notice(self) -> None:
-        """Expose the PSX profile's presentation-only provenance in the UI."""
+        """Expose native PSX source isolation and current capability limits."""
 
         renderer = getattr(self, "snapshot_renderer_combo", None)
         notice = getattr(self, "snapshot_renderer_notice", None)
-        snapshot_psx = bool(
-            renderer is not None
-            and renderer.currentData() == PSX_PROTOTYPE_VIEW_MODE)
+        # The loaded byte source is authoritative.  A transient toolbar or
+        # combo mismatch must never let native PSX bytes fall through to the
+        # legacy PC image-only export path.
+        snapshot_psx = self.viewport.source_kind == "psx_native"
         if notice is not None:
             notice.setVisible(snapshot_psx)
         if renderer is not None:
-            renderer.setToolTip(PSX_PROTOTYPE_NOTICE if snapshot_psx else "")
+            renderer.setToolTip(PSX_NATIVE_NOTICE if snapshot_psx else "")
+
+        # Native snapshots are a transactional PNG + JSON provenance pair.
+        # Preserve the user's PC image-format preference while the native
+        # source temporarily narrows the encoder contract to deterministic
+        # PNG bytes.
+        format_combo = getattr(self, "snapshot_format_combo", None)
+        if format_combo is not None:
+            if snapshot_psx:
+                if not hasattr(self, "_snapshot_pc_image_format"):
+                    self._snapshot_pc_image_format = (
+                        format_combo.currentData())
+                png_index = format_combo.findData("png")
+                if png_index >= 0 and format_combo.currentIndex() != png_index:
+                    format_combo.setCurrentIndex(png_index)
+                format_combo.setEnabled(False)
+                format_combo.setToolTip(
+                    "Native PlayStation snapshots are written as an atomic "
+                    "PNG plus .png.json provenance sidecar.")
+            else:
+                format_combo.setEnabled(True)
+                format_combo.setToolTip("")
+                previous = getattr(
+                    self, "_snapshot_pc_image_format", None)
+                if previous is not None:
+                    previous_index = format_combo.findData(previous)
+                    if previous_index >= 0:
+                        format_combo.setCurrentIndex(previous_index)
+                    del self._snapshot_pc_image_format
 
         toolbar = getattr(self, "mode_combo", None)
         if toolbar is not None:
-            toolbar_psx = toolbar.currentData() == PSX_PROTOTYPE_VIEW_MODE
-            toolbar.setToolTip(PSX_PROTOTYPE_NOTICE if toolbar_psx else "")
+            toolbar_psx = toolbar.currentData() == PSX_NATIVE_VIEW_MODE
+            toolbar.setToolTip(PSX_NATIVE_NOTICE if toolbar_psx else "")
 
     def _update_flat_tracy_destination_controls(self) -> None:
         combo = getattr(self, "snapshot_tracy_destination_combo", None)
@@ -4353,10 +5057,21 @@ class AssemblyWindow(QMainWindow):
         animated selection can resume without catching up paused wall time.
         """
 
-        has_anim = self.viewport.has_animation
+        native_psx = self.viewport.source_kind == "psx_native"
+        has_anim = self.viewport.has_animation and not native_psx
         self.play_button.setEnabled(has_anim)
         self.step_button.setEnabled(has_anim)
         self.speed_spin.setEnabled(has_anim)
+        self.play_button.setToolTip(
+            "Native PlayStation unit animation is not yet decoded. "
+            "Recovered PV2 files are static unbound effect meshes, not "
+            "animation frames. PC/OpenUA VANM animation is never applied to "
+            "PSX assets."
+            if native_psx else
+            "Continuously play resolved VANM texture and effect frames. "
+            "Uncheck to freeze the current frame; Reset Frame returns to "
+            "frame 1. Applies to the PC/OpenUA renderers. Complete-model "
+            "batch exports remain deterministic at the reset frame.")
         self._update_snapshot_frame_text()
         if not has_anim:
             self.viewport.play_animation(False)
@@ -4564,8 +5279,13 @@ class AssemblyWindow(QMainWindow):
                 self.mode_combo.setCurrentIndex(restored_index)
                 self.mode_combo.blockSignals(False)
             restored_renderer = (
-                restored_mode
-                if restored_mode in TEXTURED_VIEW_MODES else "textured"
+                PSX_NATIVE_VIEW_MODE
+                if self.viewport.source_kind == "psx_native"
+                else (
+                    restored_mode
+                    if restored_mode in TEXTURED_VIEW_MODES
+                    else "textured"
+                )
             )
             renderer_index = self.snapshot_renderer_combo.findData(
                 restored_renderer)
@@ -4584,6 +5304,12 @@ class AssemblyWindow(QMainWindow):
             self._update_flat_tracy_destination_controls()
             self._update_retail_area_distance_fade_control()
             self._update_psx_prototype_renderer_notice()
+            # Leaving Snapshot restores its saved regular camera. Re-probe the
+            # resulting native view instead of retaining the visibility cache
+            # from a different Snapshot preset/camera.
+            if self.viewport.source_kind == "psx_native":
+                self._native_zero_visible_last = None
+            self._sync_camera_dependent_ui()
         self._sync_tab_edit_mode()
         if tabs is not None:
             outer_index = tabs.currentIndex()
@@ -4627,6 +5353,7 @@ class AssemblyWindow(QMainWindow):
         self._snapshot_zoom_percent = value
         if self._snapshot_mode_active and previous > 0:
             self.viewport.adjust_snapshot_zoom(value / previous)
+            self._sync_camera_dependent_ui()
 
     def _on_snapshot_guides_toggled(self, visible: bool) -> None:
         self.snapshot_guides_button.setText(
@@ -4647,6 +5374,7 @@ class AssemblyWindow(QMainWindow):
         self.viewport.apply_snapshot_preset(
             preset, self._snapshot_output_size(),
             self._snapshot_zoom_percent)
+        self._sync_camera_dependent_ui()
 
     def _on_toolbar_view_preset_changed(self, preset: str) -> None:
         if self._snapshot_mode_active:
@@ -4655,15 +5383,20 @@ class AssemblyWindow(QMainWindow):
             preset,
             QSize(max(1, self.viewport.width()),
                   max(1, self.viewport.height())))
-        self._sync_gizmo_camera()
-        self._update_reset_camera_action()
+        self._sync_camera_dependent_ui()
         self._notify(f"View preset changed to {preset}.", 3500)
+
+    def _on_viewport_resized(self) -> None:
+        """Refresh size-derived camera UI without treating resize as input."""
+
+        self._sync_camera_dependent_ui(visibility_delay_ms=220)
 
     def _on_manual_camera_changed(self) -> None:
         """Mark the active preset as Current View after user navigation."""
 
-        self._sync_gizmo_camera()
-        self._update_reset_camera_action()
+        # Orbit and pan can emit many updates per drag.  Probe once after the
+        # operator pauses instead of rendering an extra clean pass per pixel.
+        self._sync_camera_dependent_ui(visibility_delay_ms=220)
         combo = (self.snapshot_view_combo if self._snapshot_mode_active
                  else self.toolbar_view_preset_combo)
         if combo.currentText() == "Current View":
@@ -4679,18 +5412,74 @@ class AssemblyWindow(QMainWindow):
             gizmo.set_camera_orientation(yaw, pitch)
             gizmo.set_model_matrix(self.viewport.edit_model_matrix)
 
+    def _sync_camera_dependent_ui(
+            self, *, visibility_delay_ms: int = 0) -> None:
+        """Synchronize controls derived from the active viewport camera."""
+
+        self._sync_gizmo_camera()
+        self._update_reset_camera_action()
+        self._schedule_native_visibility_hint(visibility_delay_ms)
+
     def _update_reset_camera_action(self) -> None:
         action = getattr(self, "reset_camera_action", None)
         if action is not None:
             action.setEnabled(self.viewport.can_reset_camera)
+
+    def _schedule_native_visibility_hint(self, delay_ms: int = 0) -> None:
+        """Debounce the non-blocking native one-sided-view presentation hint."""
+
+        if self.viewport.source_kind != "psx_native":
+            self._native_visibility_timer.stop()
+            self._native_zero_visible_last = None
+            return
+        self._native_visibility_timer.start(max(0, int(delay_ms)))
+
+    def _show_native_visibility_hint_if_needed(self) -> bool:
+        """Publish a status hint only when a native view becomes pixel-empty."""
+
+        if self.viewport.source_kind != "psx_native":
+            self._native_zero_visible_last = None
+            return False
+        try:
+            visible = self.viewport.native_render_has_visible_pixels(QSize(
+                max(1, self.viewport.width()),
+                max(1, self.viewport.height()),
+            ))
+        except RuntimeError:
+            # A visibility probe is advisory. The normal renderer/export path
+            # remains responsible for reporting any material rendering error.
+            return False
+        if visible is None:
+            self._native_zero_visible_last = None
+            return False
+        zero_visible = not visible
+        should_notify = zero_visible and self._native_zero_visible_last is not True
+        self._native_zero_visible_last = zero_visible
+        if should_notify:
+            self._notify(PSX_NATIVE_ZERO_VISIBLE_HINT, 9000)
+        return should_notify
 
     def _reset_view_and_gizmo(self) -> None:
         if not self.viewport.can_reset_camera:
             self._update_reset_camera_action()
             return
         self.viewport.reset_view()
-        self._sync_gizmo_camera()
-        self._update_reset_camera_action()
+        combo = (self.snapshot_view_combo if self._snapshot_mode_active
+                 else self.toolbar_view_preset_combo)
+        combo.blockSignals(True)
+        combo.setCurrentText("Current View")
+        combo.blockSignals(False)
+        if self._snapshot_mode_active:
+            # Reset becomes Snapshot's new Current View, but it is not a source
+            # replacement and must not overwrite the regular exit camera/mode.
+            self.viewport.refresh_snapshot_current_camera()
+            self._snapshot_zoom_percent = 100
+            for widget in (self.snapshot_zoom_spin,
+                           self.snapshot_zoom_slider):
+                widget.blockSignals(True)
+                widget.setValue(100)
+                widget.blockSignals(False)
+        self._sync_camera_dependent_ui()
 
     def _snapshot_background(self) -> QColor | None:
         return (QColor(self._snapshot_custom_color)
@@ -4763,6 +5552,17 @@ class AssemblyWindow(QMainWindow):
             self.snapshot_format_combo.currentData() != "png")
 
     def _snapshot_name(self) -> str:
+        if self.viewport.source_kind == "psx_native" \
+                and self._psx_selected_mesh is not None:
+            mesh = self._psx_selected_mesh
+            name = (
+                f"PSX_SLOT_{mesh.model_slot:03d}_ORD_{mesh.archive_ordinal:03d}"
+                if mesh.model_slot is not None else
+                f"PSX_ORD_{mesh.archive_ordinal:03d}"
+                if mesh.archive_ordinal is not None else
+                Path(mesh.logical_path).stem)
+            return re.sub(
+                r'[^A-Za-z0-9_.-]+', "_", name).strip(" ._") or "PSX"
         obj = self._owner_to_obj.get(self._selected_owner)
         if obj is not None:
             name = getattr(obj, "display_name", "")
@@ -4780,10 +5580,15 @@ class AssemblyWindow(QMainWindow):
         """Keep non-default renderer profiles visibly distinct by default."""
 
         renderer = getattr(self, "snapshot_renderer_combo", None)
+        if self.viewport.source_kind == "psx_native":
+            return (
+                "_PSX_NATIVE_V1"
+                if self.viewport.psx_mesh is self._psx_selected_mesh
+                and self._psx_selected_mesh is not None
+                else ""
+            )
         if renderer is None:
             return ""
-        if renderer.currentData() == PSX_PROTOTYPE_VIEW_MODE:
-            return "_PSX_PROTO_VISUAL_V1"
         if renderer.currentData() != "textured_indexed":
             return ""
         parts = []
@@ -4795,20 +5600,101 @@ class AssemblyWindow(QMainWindow):
                 f"{self.viewport.flat_tracy_destination_index:03d}_DIAGNOSTIC")
         return "_" + "_".join(parts) if parts else ""
 
+    def _resolve_native_snapshot_boundary(
+            self, source: Path, candidate: Path, *, failure_title: str) \
+            -> tuple[Path, Path, bool] | None:
+        """Resolve one native output candidate without leaking path errors.
+
+        Native sources are immutable inputs.  Resolve both sides before any
+        render or write so lexical descendants and filesystem aliases receive
+        the same refusal, while inaccessible or malformed paths fail closed.
+        """
+
+        try:
+            resolved_source = source.expanduser().resolve(strict=False)
+            resolved_candidate = candidate.expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            QMessageBox.warning(
+                self,
+                failure_title,
+                "The extracted PlayStation source and snapshot output "
+                "locations could not be resolved safely. Nothing was "
+                "rendered or written.",
+            )
+            return None
+        try:
+            resolved_candidate.relative_to(resolved_source)
+        except ValueError:
+            inside_source = False
+        else:
+            inside_source = True
+        return resolved_source, resolved_candidate, inside_source
+
     def _export_snapshot(self) -> None:
         if not self.viewport.has_model:
             QMessageBox.information(self, "No model loaded",
                                     "Load a model before exporting an image.")
             return
-        selected_format = self.snapshot_format_combo.currentData()
+        native_psx = self.viewport.source_kind == "psx_native"
+        native_selection = None
+        if native_psx:
+            build = self._psx_build
+            mesh = self._psx_selected_mesh
+            texture_pack = self.viewport.psx_texture_pack
+            selection_valid = bool(
+                isinstance(build, PsxNativeBuild)
+                and isinstance(mesh, PsxNativeMesh)
+                and (
+                    texture_pack is None
+                    or isinstance(texture_pack, PsxNativeTexturePack)
+                )
+                and self.viewport.psx_mesh is mesh
+                and self._psx_selected_texture_pack is texture_pack
+                and any(candidate is mesh for candidate in build.meshes)
+                and (
+                    texture_pack is None
+                    or any(candidate is texture_pack
+                           for candidate in build.texture_packs)
+                )
+            )
+            if not selection_valid:
+                QMessageBox.warning(
+                    self, "Native snapshot aborted",
+                    "The active native viewport no longer matches the "
+                    "selected PlayStation build, mesh, and texture pack. "
+                    "Reload the asset before exporting.")
+                return
+            native_selection = (build, mesh, texture_pack)
+        selected_format = (
+            "png" if native_psx
+            else self.snapshot_format_combo.currentData())
         preset = self.snapshot_view_combo.currentText().replace(" ", "")
-        suggested = self._last_directory / (
+        suggestion_root = self._last_directory
+        if native_selection is not None:
+            build, _mesh, _texture_pack = native_selection
+            boundary = self._resolve_native_snapshot_boundary(
+                build.root,
+                Path(suggestion_root),
+                failure_title="Native snapshot output unavailable",
+            )
+            if boundary is None:
+                return
+            source_root, _remembered_root, remembered_inside_source = boundary
+            if remembered_inside_source:
+                # Opening an extracted disc remembers that directory for the
+                # source picker.  A snapshot suggestion must not consequently
+                # point back into the immutable prototype source tree.
+                suggestion_root = source_root.parent
+        suggested = Path(suggestion_root) / (
             f"{self._snapshot_name()}_{preset}"
             f"{self._snapshot_renderer_filename_suffix()}.{selected_format}")
         labels = {"png": "PNG (*.png)", "jpg": "JPEG (*.jpg *.jpeg)",
                   "webp": "WebP (*.webp)"}
-        formats = [selected_format] + sorted(
-            self._snapshot_formats - {selected_format})
+        formats = (
+            ["png"] if native_psx else
+            [selected_format] + sorted(
+                self._snapshot_formats - {selected_format})
+        )
         filters = ";;".join(labels[fmt] for fmt in formats)
         path_text, _selected_filter = QFileDialog.getSaveFileName(
             self, "Export Snapshot", str(suggested), filters,
@@ -4824,25 +5710,115 @@ class AssemblyWindow(QMainWindow):
         suffix = path.suffix.lower().lstrip(".")
         image_format = {"png": "png", "jpg": "jpg", "jpeg": "jpg",
                         "webp": "webp"}.get(suffix)
+        if native_psx and image_format != "png":
+            QMessageBox.warning(
+                self, "Native snapshot requires PNG",
+                "Native PlayStation snapshots are committed as an atomic "
+                "PNG plus .png.json provenance sidecar. Choose a .png "
+                "filename.")
+            return
         if image_format not in self._snapshot_formats:
             QMessageBox.warning(self, "Unsupported format",
                                 f"The format '.{suffix}' is not supported by "
                                 "this Qt runtime.")
             return
-        if path.exists():
+        if native_selection is not None:
+            build, _mesh, _texture_pack = native_selection
+            boundary = self._resolve_native_snapshot_boundary(
+                build.root,
+                path,
+                failure_title="Native snapshot output refused",
+            )
+            if boundary is None:
+                return
+            _source_root, _resolved_output, output_inside_source = boundary
+            if output_inside_source:
+                QMessageBox.warning(
+                    self,
+                    "Native snapshot output refused",
+                    "Choose a snapshot path outside the extracted "
+                    "PlayStation prototype source tree. Nothing was "
+                    "rendered or written.",
+                )
+                return
+        sidecar_path = path.with_suffix(path.suffix + ".json")
+        existing_targets = (
+            [target for target in (path, sidecar_path) if target.exists()]
+            if native_psx else [path] if path.exists() else [])
+        if existing_targets:
+            target_list = "\n".join(str(target) for target in existing_targets)
             answer = QMessageBox.question(
-                self, "Replace existing file?",
-                f"The file already exists:\n{path}\n\nReplace it?",
+                self, "Replace existing snapshot output?",
+                "The following snapshot output already exists:\n"
+                f"{target_list}\n\nReplace the complete output?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No)
             if answer != QMessageBox.StandardButton.Yes:
                 return
+        overwrite_authorized = bool(existing_targets)
         background = self._snapshot_background()
         if image_format == "jpg" and background is None:
             background = QColor(96, 96, 96)
+        output_size = self._snapshot_output_size()
+        native_context = None
+        if native_psx:
+            # Import lazily: ``snapshot_studio.__init__`` exposes this window
+            # subclass and therefore cannot safely be imported while the base
+            # AssemblyWindow module itself is still initializing.
+            from snapshot_studio.psx_batch_export import (
+                PSX_NATIVE_MANUAL_PROFILE_ID,
+                PsxNativeBatchError,
+                build_native_snapshot_identity,
+                build_native_snapshot_sidecar,
+                validate_native_output_commit_boundary,
+                validate_native_renderer_info,
+                write_atomic_png_json_pair,
+            )
+            assert native_selection is not None
+            build, mesh, texture_pack = native_selection
+            if self._psx_build is not build \
+                    or self._psx_selected_mesh is not mesh \
+                    or self.viewport.psx_mesh is not mesh \
+                    or self._psx_selected_texture_pack is not texture_pack \
+                    or self.viewport.psx_texture_pack is not texture_pack \
+                    or not any(candidate is mesh for candidate in build.meshes) \
+                    or (
+                        texture_pack is not None
+                        and not any(candidate is texture_pack
+                                    for candidate in build.texture_packs)
+                    ):
+                QMessageBox.warning(
+                    self, "Native snapshot aborted",
+                    "The native PlayStation source changed while the export "
+                    "dialog was open. Nothing was written; reload the asset "
+                    "and try again.")
+                return
+            try:
+                camera_info = self.viewport.snapshot_camera_info
+                identity = build_native_snapshot_identity(
+                    build,
+                    mesh,
+                    texture_pack,
+                    view_name=self.snapshot_view_combo.currentText(),
+                    view_angles=self.viewport.camera_orientation,
+                    width=output_size.width(),
+                    height=output_size.height(),
+                    zoom_percent=self.snapshot_zoom_spin.value(),
+                    background_rgba=(
+                        tuple(background.getRgb())
+                        if background is not None else None),
+                    camera_state=camera_info,
+                    guides=self.snapshot_guides_button.isChecked(),
+                    capture_profile_id=PSX_NATIVE_MANUAL_PROFILE_ID,
+                )
+                native_context = (build, mesh, texture_pack, identity)
+            except (PsxNativeBatchError, TypeError, ValueError) as exc:
+                QMessageBox.warning(
+                    self, "Native snapshot aborted", str(exc))
+                return
         try:
             image = self.viewport.render_snapshot(
-                self._snapshot_output_size(), background,
+                output_size, background,
                 include_guides=self.snapshot_guides_button.isChecked())
         except RuntimeError as exc:
             QMessageBox.warning(
@@ -4854,6 +5830,36 @@ class AssemblyWindow(QMainWindow):
         if image.isNull():
             QMessageBox.warning(self, "Export failed",
                                 "The snapshot image could not be rendered.")
+            return
+        if native_context is not None:
+            build, mesh, texture_pack, identity = native_context
+            try:
+                renderer = validate_native_renderer_info(
+                    self.viewport.renderer_info,
+                    build=build,
+                    mesh=mesh,
+                    texture_pack=texture_pack,
+                )
+                metadata = build_native_snapshot_sidecar(
+                    identity=identity, renderer=renderer)
+                # The file dialog boundary decision predates rendering.  A
+                # previously absent parent can become a junction in that
+                # interval, so re-resolve immediately before the atomic pair
+                # transaction as well as inside the writer itself.
+                validate_native_output_commit_boundary(build.root, path)
+                pair = write_atomic_png_json_pair(
+                    image, path, metadata,
+                    overwrite=overwrite_authorized,
+                    source_root=build.root)
+            except (PsxNativeBatchError, OSError, TypeError, ValueError) as exc:
+                QMessageBox.warning(
+                    self, "Native snapshot export failed", str(exc))
+                return
+            self._last_directory = path.parent
+            self.statusBar().showMessage(
+                "Native snapshot and provenance written to "
+                f"{pair.png_path} and {pair.json_path} "
+                f"({image.width()} x {image.height()})")
             return
         writer_format = "jpeg" if image_format == "jpg" else image_format
         writer = QImageWriter(str(path), writer_format.encode("ascii"))
@@ -11154,6 +12160,14 @@ class AssemblyWindow(QMainWindow):
         self._cancel_live_scale()
         self._texture_preview_cache.clear()
         self._texture_qimage_cache.clear()
+        # A normal PC open/import can replace a native scene directly, without
+        # passing through a renderer-combo transition.  Retire the native-only
+        # visibility lifecycle and clear its provenance before rebuilding the
+        # PC tree.  A real PC tree selection below may then replace this
+        # neutral line with its own intentionally reconstructed object info.
+        self._native_visibility_timer.stop()
+        self._native_zero_visible_last = None
+        self._set_object_info(["No asset selected."])
         if family is not self._family:
             self._bundle_targets.clear()
             self._bundle_base_snapshots.clear()
@@ -11183,6 +12197,11 @@ class AssemblyWindow(QMainWindow):
             visible_owners=initial_visible,
             primary_owner=self._selected_owner,
         )
+        # Loading a PC family leaves the independent PSX library intact but
+        # makes a PC renderer active; native PSX mode may be re-entered only by
+        # installing the selected decoded PSX mesh again.
+        self.viewport.set_mode(self._pc_view_mode)
+        self._sync_renderer_selectors(self._pc_view_mode)
         if self._selected_owner:
             self.viewport.set_selected_owner(self._selected_owner)
             self.viewport.frame_owner(self._selected_owner)
@@ -11221,7 +12240,18 @@ class AssemblyWindow(QMainWindow):
             self.mapping_diag_check.isChecked())
         self._apply_diagnostics_filter()
 
+        # A PC family can replace an active native scene without passing
+        # through either renderer-combo handler. Resynchronize every
+        # source-sensitive Snapshot control here so the native PNG lock and
+        # warning cannot survive over a PC image-only export path.
+        self._update_flat_tracy_destination_controls()
+        self._update_retail_area_distance_fade_control()
+        self._update_psx_prototype_renderer_notice()
         self._sync_animation_controls()
+        self._synchronize_camera_after_source_activation()
+        batch_panel = getattr(self, "vp_batch_panel", None)
+        if batch_panel is not None:
+            batch_panel.refresh()
 
         self._update_editor_status()
         # Reapply the active main-tab contract after the viewport rebuild.

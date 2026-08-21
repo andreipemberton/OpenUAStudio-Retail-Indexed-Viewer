@@ -1,4 +1,5 @@
 import os
+import struct
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,8 +14,9 @@ from PySide6.QtWidgets import (
 )
 
 import assembly_window as assembly_window_module
-from assembly_viewer import VIEW_MODES, ViewMaterial
+from assembly_viewer import PSX_NATIVE_VIEW_MODE, VIEW_MODES, ViewMaterial
 from assembly_window import AssemblyWindow
+from psx_native_assets import PsxNativeBuild, parse_psx_mesh_bytes
 from vp_manager import VPManager, parse_visproto_text
 
 
@@ -64,6 +66,45 @@ class _FakeMenu:
         return None
 
 
+def _synthetic_psx_build(*, loose_path: str | None = None) -> PsxNativeBuild:
+    """Create one native PW3 asset without borrowing any PC fixture."""
+
+    header = bytearray(80)
+    struct.pack_into("<I", header, 0, 3)
+    struct.pack_into("<II", header, 0x38, 3, 1)
+    struct.pack_into("<II", header, 0x40, 80, 116)
+    vertices = b"".join(struct.pack("<iii", *vertex) for vertex in (
+        (-65536, 65536, 0), (0, -65536, 32768), (65536, 65536, 0)))
+    face = bytearray(26)
+    face[:4] = b"\x10\x20\x30\x40"
+    struct.pack_into("<4H", face, 4, 0, 1, 2, 2)
+    face[12:20] = bytes((0, 0, 128, 255, 255, 0, 255, 0))
+    struct.pack_into("<H", face, 20, 7)
+    face[22:26] = bytes((10, 20, 30, 30))
+    payload = bytes(header) + vertices + bytes(face)
+    payload += b"\0" * ((-len(payload)) % 4)
+    mesh = parse_psx_mesh_bytes(
+        payload,
+        logical_path=loose_path or "UNITMODL/UNIT.BIN",
+        archive_ordinal=None if loose_path else 0,
+        archive_offset=None if loose_path else 0x800,
+    )
+    return PsxNativeBuild(
+        root=Path("."),
+        system_cnf_logical_path="SYSTEM.CNF",
+        system_cnf_sha256="11" * 32,
+        boot_executable_logical_path="SCES_019.63",
+        boot_executable_sha256="22" * 32,
+        unit_archive_logical_path=(
+            None if loose_path else "UNITMODL/UNIT.BIN"),
+        unit_archive_sha256=None if loose_path else "33" * 32,
+        vehicle_roster_logical_path="LISTS/VEHICLE.TXT",
+        vehicle_roster_sha256="44" * 32,
+        vehicle_roster=("UNMAPPED ROSTER ENTRY",),
+        meshes=(mesh,),
+    )
+
+
 class WindowContractV5Tests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -103,9 +144,14 @@ class WindowContractV5Tests(unittest.TestCase):
             self.assertEqual(window.play_button.text(), "Enable animations")
             self.assertFalse(window.play_button.isChecked())
             self.assertIn(
-                "all renderer modes", window.play_button.toolTip())
+                "PC/OpenUA renderers", window.play_button.toolTip())
             self.assertTrue(window.auto_align_check.isChecked())
             self.assertEqual(window._resources_tabs.tabText(0), "Bas Manager")
+            self.assertIn(
+                "PSX Archive",
+                [window._resources_tabs.tabText(index)
+                 for index in range(window._resources_tabs.count())],
+            )
             self.assertFalse(hasattr(window, "global_edit_button"))
             toolbar_widgets = [
                 action.defaultWidget()
@@ -199,30 +245,60 @@ class WindowContractV5Tests(unittest.TestCase):
         finally:
             window.close()
 
-    def test_psx_prototype_visualization_is_explicit_synced_and_truthful(self):
+    def test_native_psx_assets_are_source_isolated_synced_and_truthful(self):
         window = AssemblyWindow()
         try:
-            toolbar_index = window.mode_combo.findData(
-                "textured_psx_prototype")
+            self.assertEqual(
+                window.mode_combo.findData("textured_psx_prototype"), -1)
+            self.assertEqual(
+                window.snapshot_renderer_combo.findData(
+                    "textured_psx_prototype"), -1)
+            toolbar_index = window.mode_combo.findData(PSX_NATIVE_VIEW_MODE)
             snapshot_index = window.snapshot_renderer_combo.findData(
-                "textured_psx_prototype")
+                PSX_NATIVE_VIEW_MODE)
             self.assertGreaterEqual(toolbar_index, 0)
             self.assertGreaterEqual(snapshot_index, 0)
             self.assertEqual(
                 window.mode_combo.itemText(toolbar_index),
-                "Textured — PSX prototype visualization (experimental)",
+                "PSX prototype assets — native (experimental)",
             )
             self.assertEqual(
                 window.snapshot_renderer_combo.itemText(snapshot_index),
-                "PSX prototype visualization (experimental)",
+                "Native PSX assets (experimental)",
             )
 
             notice = window.snapshot_renderer_notice
             notice_text = notice.text()
             self.assertTrue(notice.isHidden())
-            self.assertIn("PC/OpenUA assets", notice_text)
-            self.assertIn("does not load PlayStation UNIT.BIN/PW3", notice_text)
-            self.assertIn("not cycle-accurate PSX emulation", notice_text)
+            self.assertIn("native PSW/PSV/PW3 geometry", notice_text)
+            self.assertIn("PC/OpenUA BASE", notice_text)
+            self.assertIn("never used", notice_text)
+            self.assertIn("SETnGFX selector textures", notice_text)
+            self.assertIn(
+                "Culling for PSW/PSV and PW3", notice_text)
+            self.assertIn("raw-corner NCLIP policy", notice_text)
+            self.assertIn("floating-point projection", notice_text)
+            self.assertIn("not exact GTE edge-on rounding", notice_text)
+            self.assertIn(
+                "material-local/pre-origin UV and grayscale path",
+                notice_text)
+            for unresolved in (
+                    "Descriptor origin", "TPage", "CLUT offsets", "STP/ABR",
+                    "absolute VRAM wrapping"):
+                with self.subTest(unresolved=unresolved):
+                    self.assertIn(unresolved, notice_text)
+            self.assertIn(
+                "unresolved for PSW/PSV and PW3", notice_text)
+            self.assertIn(
+                "PW3 shade dispatch/tint is separately unresolved",
+                notice_text)
+            self.assertIn(
+                "exact recovered June executable/OVER1/asset triplet",
+                notice_text)
+            texture_tip = window.psx_texture_set_combo.toolTip()
+            self.assertIn("selector table only", texture_tip)
+            self.assertIn("descriptor origin", texture_tip)
+            self.assertIn("absolute VRAM wrapping", texture_tip)
             self.assertEqual(
                 window.snapshot_renderer_combo.itemData(
                     snapshot_index, Qt.ItemDataRole.ToolTipRole),
@@ -240,12 +316,34 @@ class WindowContractV5Tests(unittest.TestCase):
             window.snapshot_tracy_destination_index_spin.setValue(47)
             self.app.processEvents()
 
+            # Selecting the native renderer without a decoded PSX source must
+            # fail closed and retain the PC renderer.
             window.snapshot_renderer_combo.setCurrentIndex(snapshot_index)
             self.app.processEvents()
+            self.assertEqual(window.viewport.view_mode, "textured_indexed")
             self.assertEqual(
-                window.viewport.view_mode, "textured_psx_prototype")
+                window.snapshot_renderer_combo.currentData(),
+                "textured_indexed")
+
+            # Load a real native mesh object, not a styled PC AssetFamily.
+            window._set_psx_build(_synthetic_psx_build(
+                loose_path="UNITMODL/V56B.PW3"))
+            native_item = window.psx_asset_tree.topLevelItem(0)
+            self.assertIn(
+                "exact recovered June executable/OVER1/asset triplet only",
+                native_item.toolTip(0))
+            self.assertIn(
+                "not generalized to other builds or same-named assets",
+                native_item.toolTip(0))
+            window.psx_asset_tree.setCurrentItem(native_item)
+            window._load_selected_psx_asset()
+            self.app.processEvents()
             self.assertEqual(
-                window.mode_combo.currentData(), "textured_psx_prototype")
+                window.viewport.view_mode, PSX_NATIVE_VIEW_MODE)
+            self.assertEqual(
+                window.mode_combo.currentData(), PSX_NATIVE_VIEW_MODE)
+            self.assertEqual(window.viewport.source_kind, "psx_native")
+            self.assertIsNone(window.viewport._family_ref)
             self.assertFalse(notice.isHidden())
             self.assertEqual(
                 window.snapshot_renderer_combo.toolTip(), notice_text)
@@ -268,14 +366,17 @@ class WindowContractV5Tests(unittest.TestCase):
                 window.snapshot_tracy_destination_index_spin.value(), 47)
             self.assertEqual(
                 window._snapshot_renderer_filename_suffix(),
-                "_PSX_PROTO_VISUAL_V1",
+                "_PSX_NATIVE_V1",
             )
+            self.assertFalse(window.play_button.isEnabled())
+            self.assertIn(
+                "VANM animation is never applied",
+                window.play_button.toolTip())
 
-            window.mode_combo.setCurrentIndex(
-                window.mode_combo.findData("textured"))
+            window._forget_psx_source()
             self.app.processEvents()
             self.assertEqual(
-                window.snapshot_renderer_combo.currentData(), "textured")
+                window.viewport.source_kind, "none")
             self.assertTrue(notice.isHidden())
             self.assertEqual(window.snapshot_renderer_combo.toolTip(), "")
         finally:
@@ -451,6 +552,7 @@ class WindowContractV5Tests(unittest.TestCase):
                 [
                     "Import BAS Archive", "Import SKLT", "Import ILBM",
                     "Import Asset Family",
+                    "Open PlayStation Prototype Assets...",
                 ],
             )
             self.assertEqual(

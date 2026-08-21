@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 from assembly_viewer import (
     AssetViewport,
     INDEXED_EFFECTIVE_RENDERERS,
+    PSX_NATIVE_VIEW_MODE,
     PSX_PROTOTYPE_PROFILE_ID,
     PSX_PROTOTYPE_PROFILE_INFO,
     PSX_PROTOTYPE_PROFILE_VERSION,
@@ -646,10 +647,32 @@ class VPSnapshotBatchPanel(QGroupBox):
     def is_running(self) -> bool:
         return self._running
 
+    def _native_psx_source_selected_or_active(self) -> bool:
+        renderer = getattr(self.window, "snapshot_renderer_combo", None)
+        viewport = getattr(self.window, "viewport", None)
+        return bool(
+            (
+                renderer is not None
+                and renderer.currentData() == PSX_NATIVE_VIEW_MODE
+            )
+            or (
+                viewport is not None
+                and getattr(viewport, "source_kind", None) == "psx_native"
+            )
+        )
+
     def refresh(self) -> None:
         """Refresh source counts without disturbing a running job."""
 
         if self._running:
+            return
+
+        if self._native_psx_source_selected_or_active():
+            self.summary_label.setText(
+                "Batch VP Snapshots is a PC SET.BAS workflow and is disabled "
+                "for native PSX assets. Native PSX batch export will use the "
+                "separate ordinal mesh inventory.")
+            self.export_button.setEnabled(False)
             return
 
         manager = getattr(self.window, "_vp_manager", None)
@@ -714,7 +737,10 @@ class VPSnapshotBatchPanel(QGroupBox):
 
     def _set_running(self, running: bool) -> None:
         self._running = running
-        self.export_button.setEnabled(not running)
+        # Re-enable only through refresh(), which re-evaluates the active
+        # source/renderer and SET.BAS inventory instead of assuming the old
+        # PC contract is still current.
+        self.export_button.setEnabled(False)
         self.output_edit.setEnabled(not running)
         self.output_button.setEnabled(not running)
         self.skip_existing_check.setEnabled(not running)
@@ -727,6 +753,11 @@ class VPSnapshotBatchPanel(QGroupBox):
         photo_box = getattr(self.window, "_snapshot_studio_box", None)
         if photo_box is not None:
             photo_box.setEnabled(not running)
+        psx_panel = getattr(self.window, "_psx_panel", None)
+        if psx_panel is not None:
+            psx_panel.setEnabled(not running)
+        if not running:
+            self.refresh()
 
     def request_cancel(self) -> None:
         if not self._running:
@@ -737,6 +768,22 @@ class VPSnapshotBatchPanel(QGroupBox):
 
     def start(self) -> None:
         if self._running:
+            return
+
+        # Reject before inspecting PC source managers, choosing/creating an
+        # output folder, or mutating any other batch state.  Native PSX assets
+        # have an ordinal archive inventory and cannot enter the PC VP corpus.
+        if self._native_psx_source_selected_or_active():
+            QMessageBox.information(
+                self,
+                "Native PSX batch uses a separate source inventory",
+                "Batch VP Snapshots cannot render native PlayStation assets "
+                "because it enumerates PC SET.BAS/VP sources. No PC assets "
+                "were substituted. Use Batch Native PSX Meshes in the "
+                "PSX Archive tab instead.",
+            )
+            self.status_label.setText(
+                "Use the PSX Archive native mesh batch.")
             return
 
         manager = getattr(self.window, "_vp_manager", None)

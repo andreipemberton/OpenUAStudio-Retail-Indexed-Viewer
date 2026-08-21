@@ -16,6 +16,7 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from assembly_viewer import (
+    PSX_NATIVE_VIEW_MODE,
     PSX_PROTOTYPE_PROFILE_ID,
     PSX_PROTOTYPE_PROFILE_VERSION,
     PSX_PROTOTYPE_VIEW_MODE,
@@ -185,6 +186,59 @@ class SnapshotBatchIntegrityTests(unittest.TestCase):
             panel._flat_tracy_destination_mode, "live_framebuffer")
         self.assertEqual(panel._flat_tracy_forced_destination_index, 0)
         self.assertFalse(panel._distance_fade_enabled)
+
+    def test_native_source_blocks_pc_batch_before_output_or_state_access(self):
+        panel = SimpleNamespace(
+            _running=False,
+            window=SimpleNamespace(
+                snapshot_renderer_combo=SimpleNamespace(
+                    currentData=lambda: "textured"),
+                viewport=SimpleNamespace(source_kind="psx_native"),
+            ),
+            status_label=_Label(),
+        )
+        panel._native_psx_source_selected_or_active = MethodType(
+            VPSnapshotBatchPanel._native_psx_source_selected_or_active,
+            panel,
+        )
+
+        with patch(
+                "snapshot_studio.batch_export.QMessageBox.information") \
+                as information:
+            VPSnapshotBatchPanel.start(panel)
+
+        information.assert_called_once()
+        self.assertEqual(
+            panel.status_label.value,
+            "Use the PSX Archive native mesh batch.")
+        self.assertIn(
+            "Batch Native PSX Meshes",
+            information.call_args.args[2])
+
+    def test_batch_running_state_disables_psx_panel_and_refreshes_on_finish(self):
+        panel = SimpleNamespace(
+            _running=False,
+            export_button=Mock(),
+            output_edit=Mock(),
+            output_button=Mock(),
+            skip_existing_check=Mock(),
+            zip_check=Mock(),
+            cancel_button=Mock(),
+            window=SimpleNamespace(
+                _bas_panel=Mock(),
+                _snapshot_studio_box=Mock(),
+                _psx_panel=Mock(),
+            ),
+            refresh=Mock(),
+        )
+
+        VPSnapshotBatchPanel._set_running(panel, True)
+        panel.window._psx_panel.setEnabled.assert_called_with(False)
+        panel.refresh.assert_not_called()
+
+        VPSnapshotBatchPanel._set_running(panel, False)
+        panel.window._psx_panel.setEnabled.assert_called_with(True)
+        panel.refresh.assert_called_once_with()
 
     def test_skip_existing_rejects_unverified_and_mismatched_profiles(self):
         with tempfile.TemporaryDirectory() as temporary:

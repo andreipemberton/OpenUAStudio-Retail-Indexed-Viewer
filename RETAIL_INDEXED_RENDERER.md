@@ -23,15 +23,23 @@ py -3.12 -m venv .venv
 ```
 
 Open a local `.base` asset or `SET.BAS`, select a set-specific data root when
-prompted, and choose one of the textured renderer modes:
+prompted, and choose one of the two PC/OpenUA textured renderer modes:
 
 - **Textured - OpenUA preview** keeps the existing renderer and remains the
   default.
 - **Textured - Retail indexed (reconstructed)** enables the indexed path.
-- **Textured - PSX prototype visualization (experimental)** applies the fixed
-  affine/nearest/hard-edge v1 presentation profile documented in
-  [PSX_PROTOTYPE_PROFILE.md](PSX_PROTOTYPE_PROFILE.md); it does not decode PSX
-  assets or emulate the PSX renderer.
+
+Native PlayStation prototypes are intentionally outside this PC asset-family
+renderer pair. The separate
+[Native PlayStation prototype asset viewer](PSX_NATIVE_ASSET_VIEWER.md) decodes
+PSW/PSV/PW3, `UNIT.BIN`, and validated compact or sector-padded
+`SETnGFX.BIN` data from an
+explicitly selected PSX source and never reuses the PC resources described in
+this document. Native texture packs are available only through explicit
+operator selection; topology-only is the default and no mesh-to-SET affinity
+is inferred. Native manual captures and native mesh batches use their own
+transactional PNG/JSON provenance contract in the **PSX Archive** workspace;
+they do not use the PC complete-VP exporter or its retail-indexed manifest.
 
 Snapshot Studio's **Background** group contains a separate **Flat/LUM-TRACY**
 policy control:

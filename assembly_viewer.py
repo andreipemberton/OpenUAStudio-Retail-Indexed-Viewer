@@ -12,7 +12,9 @@ View modes:
   - materials        each texture/material block gets a distinct color
   - textured         textured preview using OLPL UVs (u/256)
   - textured_indexed reconstructed retail indexed rendering using the
-                     source palette plus SHADERMP/TRACYRMP lookup tables
+                      source palette plus SHADERMP/TRACYRMP lookup tables
+  - psx_native       decoded native PSW/PSV/PW3 geometry, with a validated
+                     native SETnGFX layout when explicitly selected
 
 Extras: SEN2 bounding/culling volume overlay (read-only), axes, grid,
 VANM texture animation playback (play/pause, loop or ping-pong).
@@ -22,6 +24,7 @@ UA model space uses negative Y as "up"; the widget flips Y for display only.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import bisect
 import math
@@ -34,6 +37,7 @@ from PySide6.QtCore import (
     QPointF,
     QRect,
     QRectF,
+    QSize,
     Qt,
     QTimer,
     Signal,
@@ -73,6 +77,29 @@ from indexed_renderer import (
     IndexedPiece,
     IndexedRasterizer,
 )
+from psx_native_assets import (
+    PSX_NATIVE_PARSER_ID,
+    PSX_NATIVE_PARSER_VERSION,
+    PW3_NCLIP_RAW_CORNER_ORDER,
+    PW3_TWO_SIDED_FLAG,
+    PsxNativeBuild,
+    PsxNativeMesh,
+    mesh_corner_shade_census,
+    mesh_face_prefix_census,
+    mesh_primitive_cull_census,
+    mesh_raw_corner_shade_census,
+    mesh_selector_census,
+)
+from psx_native_contract import validate_psx_native_build
+from psx_native_raster import (
+    PSX_LEGACY_PSW_RASTER_PROFILE_ID,
+    rasterize_legacy_psw_triangle,
+)
+from psx_native_textures import PsxNativeMaterial, PsxNativeTexturePack
+from psx_psw_pipeline import (
+    PsxPswPipelineError,
+    psw_material_local_uv_quotient,
+)
 
 MATERIAL_COLORS = [
     QColor(96, 170, 255), QColor(255, 170, 80), QColor(120, 220, 120),
@@ -87,7 +114,7 @@ VIEW_MODES = (
     "materials",
     "textured",
     "textured_indexed",
-    "textured_psx_prototype",
+    "psx_native",
 )
 FLAT_TRACY_DESTINATION_MODES = (
     "live_framebuffer",
@@ -111,9 +138,15 @@ INDEXED_EFFECTIVE_RENDERERS = (
     "retail_indexed_reconstructed",
     "retail_indexed_forced_tracy_diagnostic",
 )
+# The v5 identifiers remain reserved for reading old manifests.  They must not
+# alias the corrected native pipeline: v5 rendered PC/OpenUA AssetFamily data.
 PSX_PROTOTYPE_VIEW_MODE = "textured_psx_prototype"
 PSX_PROTOTYPE_PROFILE_ID = "psx_prototype_visual_v1"
 PSX_PROTOTYPE_PROFILE_VERSION = 1
+# Preserve the complete published-v5 profile contract for reading and
+# validating historical Snapshot Studio manifests.  This legacy profile is
+# deliberately not a selectable view mode; the corrected native PSX pipeline
+# has separate identifiers below.
 PSX_PROTOTYPE_PROFILE_INFO = {
     "profile_id": PSX_PROTOTYPE_PROFILE_ID,
     "profile_version": PSX_PROTOTYPE_PROFILE_VERSION,
@@ -130,15 +163,84 @@ PSX_PROTOTYPE_PROFILE_INFO = {
     "psx_vertex_snapping": "unvalidated_not_applied",
     "psx_primitive_queues": "unvalidated_not_applied",
     "scope": (
-        "platform-informed presentation of the loaded PC/OpenUA asset; "
-        "does not decode PSX UNIT.BIN, PW3, GFX, DAT/IND, or prototype "
-        "animation data"
+        "platform-informed presentation of the loaded PC/OpenUA asset; does "
+        "not decode PSX UNIT.BIN, PW3, GFX, DAT/IND, or prototype animation "
+        "data"
+    ),
+}
+PSX_NATIVE_VIEW_MODE = "psx_native"
+PSX_NATIVE_PROFILE_ID = "psx_native_asset_v1"
+PSX_NATIVE_PROFILE_VERSION = 1
+PSX_NATIVE_SOURCE_PIPELINE = "psx_native_disc_assets"
+PSX_NATIVE_PROFILE_INFO = {
+    "profile_id": PSX_NATIVE_PROFILE_ID,
+    "profile_version": PSX_NATIVE_PROFILE_VERSION,
+    "source_asset_pipeline": PSX_NATIVE_SOURCE_PIPELINE,
+    "native_psx_asset_decode": True,
+    "pc_openua_source_used": False,
+    "cycle_accurate": False,
+    "texture_binding_profile": (
+        "validated_native_setgfx_layout_operator_selected_when_available"),
+    "animation_binding_status": (
+        "unit_animation_unresolved_not_applied; "
+        "v56b_exact_june_evidence_not_applied; "
+        "pv2_static_effects_unbound_not_animation"),
+    "face_winding_status": (
+        "pw3_executable_backed_bit14_nclip_strict_positive; "
+        "psw_psv_executable_backed_unconditional_nclip_strict_positive"),
+    "pw3_corner_storage": "raw_four_file_slots_preserved",
+    "pw3_gpu_packet_corner_order": [1, 0, 2, 3],
+    "pw3_nclip_raw_corner_order": list(PW3_NCLIP_RAW_CORNER_ORDER),
+    "pw3_raw_reverse_fan_triangles": [[0, 2, 1], [0, 3, 2]],
+    "pw3_primitive_cull_flag": "little_endian_u16_prefix_plus_0_bit_0x4000",
+    "pw3_primitive_cull_policy": (
+        "bit14_clear_nclip_strict_positive; bit14_set_two_sided"),
+    "pw3_nclip_numeric_domain": (
+        "viewer_float_projection; gte_fixed_point_rounding_not_emulated"),
+    "psw_psv_gpu_packet_corner_order": [1, 0, 2, 3],
+    "psw_psv_nclip_raw_corner_order": [1, 0, 2],
+    "psw_psv_primitive_cull_policy": "unconditional_nclip_strict_positive",
+    "psw_psv_nclip_numeric_domain": (
+        "viewer_float_projection; gte_fixed_point_rounding_not_emulated"),
+    "psw_psv_uv_profile": (
+        "recovered_signed_16_16_div2_toward_zero_material_local_pre_origin"),
+    "psw_psv_descriptor_origin_state": (
+        "omitted_material_local_preview_runtime_binding_unresolved"),
+    "pw3_uv_profile": (
+        "authored_uv_byte_scaled_256_to_128_nearest_half_up_preview"),
+    "native_absolute_vram_binding": (
+        "descriptor_origins_tpage_clut_offset_wrap_unresolved_not_applied"),
+    "psw_psv_raster_profile": PSX_LEGACY_PSW_RASTER_PROFILE_ID,
+    "native_corner_shades": (
+        "raw_preserved; legacy_psw_material_local_uv_quotient_and_direct_"
+        "grayscale_affine_modulation_applied_when_textured; late_pw3_"
+        "direct_tinted_packet_formulas_recovered_but_effective_pw3_"
+        "dispatch_unresolved_not_applied"),
+    "psx_gpu_color_math": (
+        "modulation_zero_word_stp_abr_helpers_recovered; "
+        "pw3_selector_to_descriptor_tpage_and_psw_descriptor_population_"
+        "unresolved_hard_gates"),
+    "psx_color_semantics": "conditional_on_explicit_texture_pack_selection",
+    "psx_dithering": (
+        "hardware_matrix_recovered; ua_enable_state_unresolved_not_applied"),
+    "psx_vertex_snapping": (
+        "gte_integer_helper_recovered; viewer_transform_mapping_unresolved_"
+        "not_applied"),
+    "psx_primitive_queues": (
+        "otz_minus_16_bucket_and_same_bucket_lifo_recovered; "
+        "full_traversal_unresolved_not_applied"),
+    "scope": (
+        "read-only native PSW/PSV/PW3 PlayStation asset preview; validated "
+        "native SETnGFX selector textures are available for explicit operator "
+        "selection when present, with no inferred mesh/environment affinity; "
+        "no PC BASE, SKLT, ILBM, VANM, SET.BAS, SHADERMP, or TRACY source is "
+        "used"
     ),
 }
 TEXTURED_VIEW_MODES = (
     "textured",
     "textured_indexed",
-    PSX_PROTOTYPE_VIEW_MODE,
+    PSX_NATIVE_VIEW_MODE,
 )
 VIEW_PRESET_ANGLES = {
     "Front": (0.0, 0.0),
@@ -173,6 +275,10 @@ class ViewMaterial:
     anim_type: int = 0              # 0 loop, 1 ping-pong (from BANI STRC)
     tracy_mode: str = "none"        # none | clear | flat | mapped
     tracy_light: bool = False
+    # Exact indexed/CLUT source retained only for the bounded legacy PSW
+    # affine grayscale-modulation preview.  PW3 does not consume this field
+    # until its effective shade dispatcher and descriptor TPage are proven.
+    native_psx_material: PsxNativeMaterial | None = None
 
     @property
     def additive(self) -> bool:
@@ -184,7 +290,9 @@ class ViewMaterial:
 @dataclass
 class ViewFace:
     vertices: list[tuple[float, float, float]]
-    uvs: list[tuple[int, int]]      # texture-space bytes (0..255)
+    # PC/PW3 retain texture-space bytes.  PSW/PSV stores the separate direct
+    # descriptor-relative material-local quotient (0..127) for previewing.
+    uvs: list[tuple[int | float, int | float]]
     material: int
     shade: int = 0
     poly_id: int = -1
@@ -195,6 +303,14 @@ class ViewFace:
     owner: str = "root"             # FamilyObject.owner_path for object
                                     # selection / isolation
     block_index: int = -1           # structural ADES material identity
+    # Native PSX fields are preserved for inspection/provenance.  They are
+    # not treated as PC AREA shade or material flags.
+    native_corner_shades: tuple[int, ...] = ()
+    native_raw_corner_shades: tuple[int, ...] = ()
+    native_face_offset: int | None = None
+    native_opaque_prefix_hex: str = ""
+    native_pw3_primitive_flags: int | None = None
+    native_mesh_format_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -231,6 +347,34 @@ def _retail_source_face_front_facing(
     )
     visibility = sum(normal[axis] * points[0][axis] for axis in range(3))
     return visibility >= 0.0
+
+
+def _pw3_packet_nclip_front_facing(
+        raw_screen_corners: tuple[QPointF, ...] | list[QPointF]) -> bool:
+    """Apply the recovered PSX unit GT4 strict-positive NCLIP rule.
+
+    The December PSW renderer, its March compatibility path, and the June PW3
+    renderer all submit packet corners from authored slots 1,0,2,3 and test
+    MAC0 before any clipping or quad decomposition.  NCLIP accepts MAC0 > 0;
+    an exactly edge-on primitive is therefore rejected.  Only PW3 prefix bit
+    14 is proven to bypass this helper.  Coordinates are the viewer's
+    floating-point projection; this does not claim GTE fixed-point rounding or
+    cycle accuracy.
+    """
+
+    if len(raw_screen_corners) != 4:
+        raise ValueError("PW3 NCLIP requires exactly four raw corner slots")
+    packet_triangle = tuple(
+        raw_screen_corners[index]
+        for index in PW3_NCLIP_RAW_CORNER_ORDER)
+    area = sum(
+        packet_triangle[index].x()
+        * packet_triangle[(index + 1) % 3].y()
+        - packet_triangle[(index + 1) % 3].x()
+        * packet_triangle[index].y()
+        for index in range(3)
+    )
+    return area > 0.0
 
 
 def _retail_area_distance_fade_vertex(
@@ -564,6 +708,7 @@ class AssetViewport(QWidget):
     animationFrameChanged = Signal(str)
     indexedPaletteChanged = Signal()
     manualCameraChanged = Signal()  # orbit, pan or zoom changed by the user
+    viewportResized = Signal()      # passive size change; camera is untouched
     pastePreviewConfirmRequested = Signal()
     pastePreviewActiveChanged = Signal(bool)
 
@@ -599,6 +744,12 @@ class AssetViewport(QWidget):
         self._primary_owner: str | None = None
         self._owner_bounds: dict[str, tuple] = {}
         self._texture_image_cache: dict[tuple, QImage] = {}
+        self._source_kind = "none"
+        self._psx_build: PsxNativeBuild | None = None
+        self._psx_mesh: PsxNativeMesh | None = None
+        self._psx_texture_pack: PsxNativeTexturePack | None = None
+        self._psx_source_info: dict = {}
+        self._psx_build_fingerprint: tuple[str | None, ...] = ()
         self._show_diag_overlay = True
         self._indexed_adapter: IndexedFamilyAdapter | None = None
         self._indexed_unavailable_reason = "no AssetFamily is loaded"
@@ -740,6 +891,12 @@ class AssetViewport(QWidget):
         self._pick_shapes = []
         self._owner_bounds = {}
         self._selected_owner = None
+        self._source_kind = "none"
+        self._psx_build = None
+        self._psx_mesh = None
+        self._psx_texture_pack = None
+        self._psx_source_info = {}
+        self._psx_build_fingerprint = ()
         self.stop_animation()
         self.update()
 
@@ -779,6 +936,7 @@ class AssetViewport(QWidget):
             self._texture_image_cache.clear()
         selected = self._selected_owner
         self.clear()
+        self._source_kind = "pc_openua"
         self._family_ref = family
         if same_family and reuse_indexed_adapter:
             self._indexed_adapter = cached_adapter
@@ -838,6 +996,242 @@ class AssetViewport(QWidget):
         if not keep_camera:
             self.reset_view()
         self._reset_animation_states()
+
+    def load_psx_mesh(
+            self, build: PsxNativeBuild, mesh: PsxNativeMesh,
+            *, texture_pack: PsxNativeTexturePack | None = None,
+            keep_camera: bool = False) -> None:
+        """Install one decoded native PSX mesh as a read-only scene.
+
+        This path intentionally clears the PC ``AssetFamily`` and indexed
+        adapters before constructing faces.  An unresolved PSX texture binding
+        therefore cannot fall back to an ILBM or any other PC resource.
+        """
+
+        if not isinstance(build, PsxNativeBuild):
+            raise TypeError("native PSX scene requires a PsxNativeBuild")
+        if not isinstance(mesh, PsxNativeMesh):
+            raise TypeError("native PSX scene requires a PsxNativeMesh")
+        # Validate the whole frozen build before choosing a format-specific
+        # renderer.  This prevents replace()-fabricated PW3 bytes from being
+        # rendered or certified under PSW semantics (and vice versa), and it
+        # also pins PV2 and executable runtime-slot proof as build invariants.
+        validate_psx_native_build(build)
+        if not any(candidate is mesh for candidate in build.meshes):
+            raise ValueError(
+                "native PSX mesh does not belong to the selected build")
+        if texture_pack is not None \
+                and not isinstance(texture_pack, PsxNativeTexturePack):
+            raise TypeError("native PSX texture source must be a texture pack")
+        if texture_pack is not None and not any(
+                candidate is texture_pack
+                for candidate in build.texture_packs):
+            raise ValueError(
+                "native PSX texture pack does not belong to the selected "
+                "build")
+
+        # Derive the descriptor-relative PSW preview coordinates before any
+        # viewport mutation.  The lossless signed components remain on the
+        # source face and the compatibility byte UVs remain untouched.  This
+        # path fails closed because descriptor origin, TPage, CLUT offset, and
+        # runtime material binding have not been connected to the viewer.
+        prepared_psw_uvs: list[tuple[
+            tuple[int, int], tuple[int, int],
+            tuple[int, int], tuple[int, int],
+        ]] = []
+        if mesh.format_id == "PSW/PSV":
+            for face_index, native_face in enumerate(mesh.faces):
+                fixed_uvs = native_face.psw_uv_fixed_16_16
+                if type(fixed_uvs) is not tuple or len(fixed_uvs) != 4:
+                    raise ValueError(
+                        f"native PSW/PSV face {face_index} lacks four signed "
+                        "16.16 UV pairs")
+                local_uvs: list[tuple[int, int]] = []
+                for corner_index, uv in enumerate(fixed_uvs):
+                    if type(uv) is not tuple or len(uv) != 2:
+                        raise ValueError(
+                            f"native PSW/PSV face {face_index} corner "
+                            f"{corner_index} lacks a signed 16.16 UV pair")
+                    try:
+                        local_uvs.append((
+                            psw_material_local_uv_quotient(uv[0]),
+                            psw_material_local_uv_quotient(uv[1]),
+                        ))
+                    except PsxPswPipelineError as exc:
+                        raise ValueError(
+                            f"native PSW/PSV face {face_index} corner "
+                            f"{corner_index} cannot enter the material-local "
+                            f"preview: {exc}") from exc
+                prepared_psw_uvs.append(tuple(local_uvs))  # type: ignore[arg-type]
+
+        # Resolve every used selector before mutating the current viewport.
+        # This makes an incompatible texture pack fail as one atomic source
+        # transition instead of leaving a half-textured native scene.
+        prepared_textures: dict[int, QImage] = {}
+        prepared_native_materials: dict[int, PsxNativeMaterial] = {}
+        if texture_pack is not None:
+            for selector in sorted({
+                    face.texture_selector for face in mesh.faces}):
+                material = texture_pack.material(selector)
+                image = QImage(
+                    material.rgba,
+                    material.width,
+                    material.height,
+                    material.width * 4,
+                    QImage.Format.Format_RGBA8888,
+                ).copy()
+                if image.isNull():
+                    raise RuntimeError(
+                        f"native PSX selector {selector} produced no image")
+                prepared_textures[selector] = image
+                prepared_native_materials[selector] = material
+
+        previous_camera = self._camera_state() if keep_camera else None
+        self.clear()
+        self._family_ref = None
+        self._visible_owners = None
+        self._primary_owner = None
+        self._indexed_adapter = None
+        self._indexed_unavailable_reason = "native PSX source is active"
+        self._indexed_runtime_error = ""
+        self._source_kind = "psx_native"
+        self._psx_build = build
+        self._psx_mesh = mesh
+        self._psx_texture_pack = texture_pack
+        # Source provenance is derived from the frozen build selection, never
+        # accepted as caller-authored renderer metadata.  This prevents a
+        # native scene from being paired with another build's hashes or from
+        # overwriting trusted profile/effective-renderer fields.
+        self._psx_source_info = copy.deepcopy(build.portable_identity)
+        self._psx_build_fingerprint = (
+            build.system_cnf_sha256,
+            build.boot_executable_sha256,
+            build.unit_archive_sha256,
+            build.vehicle_roster_sha256,
+        )
+
+        selectors = sorted({
+            face.texture_selector for face in mesh.faces
+        })
+        selector_material: dict[int, int] = {}
+        for selector in selectors:
+            # A stable diagnostic color remains the honest fallback whenever
+            # the operator leaves the native texture pack unselected.
+            color = QColor.fromHsv((selector * 137) % 360, 165, 225)
+            selector_material[selector] = len(self._materials)
+            self._materials.append(ViewMaterial(
+                label=f"PSX selector {selector}",
+                kind=("psx_native_texture"
+                      if selector in prepared_textures
+                      else "psx_native_selector"),
+                color=color,
+                image=prepared_textures.get(selector),
+                native_psx_material=prepared_native_materials.get(selector),
+            ))
+
+        owner = mesh.label
+        for poly_id, native_face in enumerate(mesh.faces):
+            # Both recovered unit paths submit a GT4 from all four authored
+            # file slots.  Keep the collapsed tuples only as compatibility and
+            # inspection views; rendering uses the executable-backed packet
+            # topology for PW3 and legacy PSW/PSV alike.
+            render_indices = native_face.raw_vertex_indices
+            render_uvs = (
+                prepared_psw_uvs[poly_id]
+                if mesh.format_id == "PSW/PSV"
+                else native_face.raw_uv_bytes
+            )
+            self._faces.append(ViewFace(
+                vertices=[mesh.vertices[index]
+                          for index in render_indices],
+                uvs=list(render_uvs),
+                material=selector_material[native_face.texture_selector],
+                # PSX corner shades are retained below.  Applying the PC AREA
+                # face-shade formula here would be a cross-platform guess.
+                shade=0,
+                poly_id=poly_id,
+                mapped=True,
+                primary=True,
+                owner=owner,
+                block_index=native_face.texture_selector,
+                native_corner_shades=native_face.corner_shades,
+                native_raw_corner_shades=native_face.raw_corner_shades,
+                native_face_offset=native_face.source_offset,
+                native_opaque_prefix_hex=(
+                    native_face.opaque_prefix.hex()),
+                native_pw3_primitive_flags=(
+                    native_face.pw3_primitive_flags),
+                native_mesh_format_id=mesh.format_id,
+            ))
+
+        if not self._faces:
+            # ``parse_psx_mesh_bytes`` already rejects zero-face meshes.  Keep
+            # this guard at the renderer boundary as well.
+            self.clear()
+            raise RuntimeError("native PSX mesh produced no renderable faces")
+        points = [vertex for face in self._faces for vertex in face.vertices]
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        zs = [point[2] for point in points]
+        self._center = (
+            (min(xs) + max(xs)) / 2,
+            (min(ys) + max(ys)) / 2,
+            (min(zs) + max(zs)) / 2,
+        )
+        extent = max(
+            max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs),
+            1e-6)
+        self._scale = 2.0 / extent
+        self._owner_bounds[owner] = (
+            min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+        if texture_pack is None:
+            if build.texture_packs:
+                self._diagnostics = [
+                    "Native PSX geometry loaded in topology-only mode. "
+                    "Validated native SETnGFX packs are available for explicit "
+                    "operator selection, but no mesh/environment affinity "
+                    "was inferred and no PC texture was substituted."
+                ]
+            else:
+                self._diagnostics = [
+                    "Native PSX geometry loaded. This source has no validated "
+                    "native SETnGFX pack, so selectors use diagnostic colors; "
+                    "no PC texture was substituted."
+                ]
+        else:
+            if mesh.format_id == "PSW/PSV":
+                color_notice = (
+                    "The recovered legacy material-local UV quotient and "
+                    "direct-grayscale packet shades are applied with bounded "
+                    "affine native modulation. Descriptor origin, TPage, "
+                    "CLUT offset, STP/ABR, and runtime material binding remain "
+                    "unresolved and are not applied."
+                )
+            else:
+                color_notice = (
+                    "PW3 direct/tinted packet formulas are preserved as "
+                    "evidence, but effective dispatch, descriptor TPage "
+                    "binding, and STP/ABR application remain unresolved and "
+                    "are not applied."
+                )
+            self._diagnostics = [
+                "Native PSX geometry and a validated SETnGFX selector table "
+                f"loaded from {texture_pack.logical_path} "
+                f"({texture_pack.layout_id}). {color_notice}"
+            ]
+        self._mode = PSX_NATIVE_VIEW_MODE
+        self._reset_animation_states()
+        if previous_camera is not None:
+            self._set_camera_state(previous_camera)
+        else:
+            self.reset_view()
+        self._invalidate_last_render_metadata()
+        self.statusMessage.emit(
+            f"Native PSX mesh loaded: {mesh.label}. "
+            + (f"Texture pack: {texture_pack.logical_path}. "
+               if texture_pack is not None else "Topology-only mode. ")
+            + "No PC/OpenUA asset resources were used.")
+        self.update()
 
     # -- object selection / isolation ---------------------------------------------
 
@@ -1006,16 +1400,58 @@ class AssetViewport(QWidget):
         return self._yaw, self._pitch
 
     @property
-    def has_loaded_resource(self) -> bool:
-        """Return whether the viewport currently owns a loaded asset family."""
+    def snapshot_camera_info(self) -> dict:
+        """Return the active camera as portable JSON-compatible values."""
 
-        return self._family_ref is not None
+        state = self._camera_state()
+        pan = state["pan"]
+        return {
+            "yaw": float(state["yaw"]),
+            "pitch": float(state["pitch"]),
+            "zoom": float(state["zoom"]),
+            "pan": [float(pan.x()), float(pan.y())],
+            "center": [float(value) for value in state["center"]],
+            "scale": float(state["scale"]),
+        }
+
+    @property
+    def has_loaded_resource(self) -> bool:
+        """Return whether the viewport currently owns a renderable source."""
+
+        return bool(
+            self._family_ref is not None
+            or (
+                self._source_kind == "psx_native"
+                and self._psx_mesh is not None
+            )
+        )
 
     @property
     def camera_is_reset(self) -> bool:
         """Return whether orbit, pan and zoom match the canonical view."""
 
         epsilon = self.CAMERA_EPSILON
+        if self._source_kind == "psx_native" and self._faces:
+            expected = self._fitted_camera_state(
+                QSize(max(1, self.width()), max(1, self.height())),
+                yaw=self.RESET_YAW,
+                pitch=self.RESET_PITCH,
+            )
+            if expected is not None:
+                expected_pan = expected["pan"]
+                expected_center = expected["center"]
+                return (
+                    abs(self._yaw - expected["yaw"]) <= epsilon
+                    and abs(self._pitch - expected["pitch"]) <= epsilon
+                    and abs(self._zoom - expected["zoom"]) <= epsilon
+                    and abs(self._pan.x() - expected_pan.x()) <= epsilon
+                    and abs(self._pan.y() - expected_pan.y()) <= epsilon
+                    and all(
+                        abs(actual - reference) <= epsilon
+                        for actual, reference in zip(
+                            self._center, expected_center))
+                    and abs(self._scale - expected["scale"]) <= epsilon
+                )
         return (
             abs(self._yaw - self.RESET_YAW) <= epsilon
             and abs(self._pitch - self.RESET_PITCH) <= epsilon
@@ -2745,6 +3181,17 @@ class AssetViewport(QWidget):
 
     def set_mode(self, mode: str) -> None:
         if mode in VIEW_MODES:
+            if mode == PSX_NATIVE_VIEW_MODE \
+                    and self._source_kind != "psx_native":
+                raise RuntimeError(
+                    "Native PSX mode requires a decoded PSW/PSV/PW3 asset; "
+                    "the loaded PC/OpenUA model will not be substituted.")
+            if mode in {"textured", "textured_indexed"} \
+                    and self._source_kind == "psx_native":
+                raise RuntimeError(
+                    "OpenUA and Retail indexed renderers require a PC/OpenUA "
+                    "AssetFamily; they cannot render the active native PSX "
+                    "scene.")
             self._mode = mode
             self._last_render_requested_mode = "not_rendered"
             self._last_effective_renderer = "not_rendered"
@@ -2773,15 +3220,18 @@ class AssetViewport(QWidget):
                     self.statusMessage.emit(
                         "Retail indexed renderer unavailable; using OpenUA "
                         f"preview fallback: {self._indexed_unavailable_reason}")
-            elif mode == PSX_PROTOTYPE_VIEW_MODE:
-                # This first profile deliberately changes only the raster
-                # presentation of the already-loaded PC/OpenUA asset.  It is
-                # not a claim that BASE/SKLT/ILBM data became a decoded PSX
-                # UNIT.BIN/PW3 scene merely by selecting another renderer.
+            elif mode == PSX_NATIVE_VIEW_MODE:
+                if self._psx_texture_pack is None:
+                    detail = (
+                        "topology only; choose a native SETnGFX pack "
+                        "explicitly when available")
+                else:
+                    detail = (
+                        "operator-selected native SETnGFX pack; validated "
+                        "selector table, unproven mesh/environment affinity")
                 self.statusMessage.emit(
-                    "PSX prototype visualization active (experimental; "
-                    "PC/OpenUA assets; affine UV, nearest sampling, "
-                    "antialiasing off).")
+                    "Native PSX asset preview active (experimental; decoded "
+                    f"PSW/PSV/PW3 geometry; {detail}).")
             self.update()
 
     def _invalidate_last_render_metadata(self) -> None:
@@ -3103,22 +3553,190 @@ class AssetViewport(QWidget):
         if requested == "textured_indexed" \
                 or effective in INDEXED_EFFECTIVE_RENDERERS:
             return self.indexed_renderer_info
-        if requested == PSX_PROTOTYPE_VIEW_MODE \
-                or effective == PSX_PROTOTYPE_PROFILE_ID:
-            fallback_used = effective == "openua_preview_fallback"
-            return {
-                "available": True,
-                "resources_available": True,
-                "mode": PSX_PROTOTYPE_PROFILE_ID,
+        if self._source_kind == "psx_native" \
+                or requested == PSX_NATIVE_VIEW_MODE \
+                or effective == PSX_NATIVE_PROFILE_ID:
+            mesh = self._psx_mesh
+            texture_pack = self._psx_texture_pack
+            available = bool(
+                self._source_kind == "psx_native" and mesh is not None)
+            texture_packs_available = bool(
+                self._psx_source_info.get("native_texture_packs"))
+            info = {
+                "available": available,
+                "resources_available": available,
+                "mode": PSX_NATIVE_PROFILE_ID,
                 "requested_mode": requested,
                 "effective_mode": effective,
-                "fallback_used": fallback_used,
+                "fallback_used": False,
                 "fallback_reason": self._last_render_fallback_reason,
                 "reason": self._last_render_fallback_reason,
                 "background_mode": self._last_render_background,
                 "presentation_background_mode": self._last_render_background,
-                **PSX_PROTOTYPE_PROFILE_INFO,
+                "parser_id": PSX_NATIVE_PARSER_ID,
+                "parser_version": PSX_NATIVE_PARSER_VERSION,
+                **copy.deepcopy(PSX_NATIVE_PROFILE_INFO),
+                "sources": {
+                    "psx_build": copy.deepcopy(self._psx_source_info),
+                },
             }
+            info.update({
+                "native_texture_decode": texture_pack is not None,
+                "psx_color_semantics": (
+                    (
+                        (
+                            "bgr555_and_zero_word_transparency_applied; "
+                            "legacy_psw_material_local_uv_quotient_and_direct_"
+                            "grayscale_affine_modulation_applied; descriptor_"
+                            "origin_tpage_clut_offset_stp_abr_runtime_binding_"
+                            "unresolved"
+                        )
+                        if mesh is not None
+                        and mesh.format_id == "PSW/PSV" else (
+                            "bgr555_and_zero_word_transparency_applied; "
+                            "pw3_packet_shade_formulas_recovered_but_"
+                            "effective_dispatch_unresolved_not_applied; "
+                            "descriptor_origin_tpage_clut_offset_stp_abr_"
+                            "runtime_binding_unresolved"
+                        )
+                    )
+                    if texture_pack is not None else (
+                        "not_applied_topology_only; "
+                        "validated_native_packs_available_not_selected; "
+                        "diagnostic_selector_colors"
+                        if texture_packs_available else
+                        "not_applied_topology_only; "
+                        "no_validated_native_pack; diagnostic_selector_colors"
+                    )),
+                "texture_binding_status": (
+                    "operator_selected_pack_with_validated_selector_table"
+                    if texture_pack is not None
+                    else (
+                        "topology_only_operator_default"
+                        if texture_packs_available
+                        else "unavailable_not_substituted"
+                    )),
+                "texture_selector_table_status": (
+                    "validated_native_setgfx_selector_table"
+                    if texture_pack is not None
+                    else (
+                        "validated_native_packs_available_not_selected"
+                        if texture_packs_available
+                        else "unavailable_not_substituted"
+                    )),
+                "mesh_to_texture_pack_binding": (
+                    "operator_selected_environment_variant_no_mesh_inherent_"
+                    "affinity"
+                    if texture_pack is not None else (
+                        "none_selected"
+                        if texture_packs_available else "none_available"
+                    )),
+                "native_texture_pack_path": (
+                    texture_pack.logical_path
+                    if texture_pack is not None else None),
+                "native_texture_pack_sha256": (
+                    texture_pack.source_sha256
+                    if texture_pack is not None else None),
+                "native_texture_pack_layout_id": (
+                    texture_pack.layout_id
+                    if texture_pack is not None else None),
+                "native_texture_selector_to_pixel_bank_mapping": (
+                    texture_pack.selector_to_pixel_bank_mapping
+                    if texture_pack is not None else None),
+                "native_texture_material_slot_count": (
+                    texture_pack.material_slot_count
+                    if texture_pack is not None else None),
+                "native_texture_populated_selectors": (
+                    list(texture_pack.populated_selectors)
+                    if texture_pack is not None else None),
+                "native_texture_dimensions": (
+                    [128, 128] if texture_pack is not None else None),
+                "native_texture_index_depth": (
+                    4 if texture_pack is not None else None),
+                "native_texture_mapping": (
+                    texture_pack.selector_to_pixel_bank_mapping
+                    if texture_pack is not None else None),
+                "native_texture_uv_profile": (
+                    (
+                        PSX_NATIVE_PROFILE_INFO["psw_psv_uv_profile"]
+                        if mesh is not None
+                        and mesh.format_id == "PSW/PSV"
+                        else PSX_NATIVE_PROFILE_INFO["pw3_uv_profile"]
+                    )
+                    if texture_pack is not None else None),
+                "native_texture_descriptor_origin": (
+                    (
+                        PSX_NATIVE_PROFILE_INFO[
+                            "psw_psv_descriptor_origin_state"]
+                        if mesh is not None
+                        and mesh.format_id == "PSW/PSV"
+                        else "unresolved_not_applied"
+                    )
+                    if texture_pack is not None else None),
+                "native_texture_absolute_vram_binding": (
+                    "unresolved_not_applied"
+                    if texture_pack is not None else None),
+                "native_texture_filtering": (
+                    "nearest" if texture_pack is not None else None),
+                "native_texture_zero_rule": (
+                    "resolved_CLUT_word_0x0000_transparent"
+                    if texture_pack is not None else None),
+                "native_texture_stp": (
+                    "preserved_not_blended"
+                    if texture_pack is not None else (
+                        "not_applied_no_pack_selected"
+                        if texture_packs_available else "unavailable"
+                    )),
+            })
+            if mesh is not None:
+                info.update({
+                    "native_asset_path": mesh.logical_path,
+                    "native_mesh_format": mesh.format_id,
+                    "native_mesh_format_version": mesh.format_version,
+                    "native_mesh_ordinal": mesh.archive_ordinal,
+                    "native_model_slot": mesh.model_slot,
+                    "native_model_slot_evidence_id": (
+                        mesh.model_slot_evidence_id),
+                    "native_mesh_offset": mesh.archive_offset,
+                    "native_mesh_sector": mesh.archive_sector,
+                    "native_mesh_sha256": mesh.body_sha256,
+                    "native_vertex_stream_sha256": (
+                        mesh.vertex_stream_sha256),
+                    "native_face_stream_sha256": mesh.face_stream_sha256,
+                    "vertex_count": len(mesh.vertices),
+                    "face_count": len(mesh.faces),
+                    "texture_selector_census": [
+                        [selector, count]
+                        for selector, count in mesh_selector_census(mesh)
+                    ],
+                    "native_face_prefix_census": [
+                        [prefix, count]
+                        for prefix, count in mesh_face_prefix_census(mesh)
+                    ],
+                    "native_primitive_cull_census": [
+                        [policy, count]
+                        for policy, count in mesh_primitive_cull_census(mesh)
+                    ],
+                    "native_corner_shade_census": [
+                        [value, count]
+                        for value, count in mesh_corner_shade_census(mesh)
+                    ],
+                    "native_raw_corner_shade_census": [
+                        [value, count]
+                        for value, count in mesh_raw_corner_shade_census(mesh)
+                    ],
+                    "name_binding_status": (
+                        "model_slot_only_friendly_name_unmapped"
+                        if mesh.model_slot is not None else
+                        "dense_archive_ordinal_only_friendly_name_unmapped"
+                        if mesh.archive_ordinal is not None else
+                        "native_filename_only_runtime_identity_unverified"),
+                    "runtime_identity_status": (
+                        "executable_allocation_table_proven"
+                        if mesh.model_slot is not None else
+                        "unavailable_unproven"),
+                })
+            return info
         return {
             "available": True,
             "resources_available": True,
@@ -3163,6 +3781,20 @@ class AssetViewport(QWidget):
     def has_model(self) -> bool:
         return bool(self._faces)
 
+    @property
+    def source_kind(self) -> str:
+        """Return ``pc_openua``, ``psx_native``, or ``none``."""
+
+        return self._source_kind
+
+    @property
+    def psx_mesh(self) -> PsxNativeMesh | None:
+        return self._psx_mesh
+
+    @property
+    def psx_texture_pack(self) -> PsxNativeTexturePack | None:
+        return self._psx_texture_pack
+
     def _camera_state(self) -> dict:
         return {
             "yaw": self._yaw,
@@ -3180,6 +3812,22 @@ class AssetViewport(QWidget):
         self._pan = QPointF(state["pan"])
         self._center = state["center"]
         self._scale = state["scale"]
+
+    def _snapshot_source_identity(self) -> tuple:
+        """Return the in-process scene identity used by Snapshot restore."""
+
+        if self._source_kind == "psx_native":
+            # A texture-pack-only reload deliberately keeps the same camera
+            # transaction, so the pack is not part of the scene identity.
+            return (
+                self._source_kind,
+                id(self._psx_build),
+                id(self._psx_mesh),
+                self._psx_build_fingerprint,
+            )
+        if self._source_kind == "pc_openua":
+            return (self._source_kind, id(self._family_ref))
+        return (self._source_kind,)
 
     def begin_snapshot_mode(self, background: QColor | None = None) -> None:
         """Enter the temporary clean Photo Studio view without editing data."""
@@ -3204,6 +3852,7 @@ class AssetViewport(QWidget):
                     self._retail_area_distance_fade_enabled),
                 "retail_unmapped_polygon_policy": (
                     self._retail_unmapped_polygon_policy),
+                "source_identity": self._snapshot_source_identity(),
             }
             self._snapshot_current_camera = camera.copy()
             self._snapshot_current_camera["pan"] = QPointF(camera["pan"])
@@ -3211,7 +3860,9 @@ class AssetViewport(QWidget):
         self._snapshot_show_guides = False
         self._snapshot_background = (QColor(background)
                                      if background is not None else None)
-        if self._mode not in TEXTURED_VIEW_MODES:
+        if self._source_kind == "psx_native":
+            self._mode = PSX_NATIVE_VIEW_MODE
+        elif self._mode not in TEXTURED_VIEW_MODES:
             self._mode = "textured"
         self._show_sen = False
         self._show_axes = False
@@ -3222,13 +3873,69 @@ class AssetViewport(QWidget):
         self._show_diag_overlay = False
         self.update()
 
+    def refresh_snapshot_current_camera(self) -> bool:
+        """Capture the active camera as Snapshot's new ``Current View``.
+
+        Source activation can intentionally replace and fit the scene while a
+        persistent Snapshot workspace is already open.  In that case the
+        entry-time camera no longer belongs to the active model.  Callers use
+        this explicit hook only after a successful source/mesh transition;
+        ordinary preset changes and keep-camera texture reloads do not rewrite
+        the saved Current View.
+        """
+
+        if not self._snapshot_active:
+            return False
+        camera = self._camera_state()
+        self._snapshot_current_camera = camera.copy()
+        self._snapshot_current_camera["pan"] = QPointF(camera["pan"])
+        return True
+
+    def commit_snapshot_source_activation(self) -> bool:
+        """Make a successful scene replacement Snapshot's new baseline.
+
+        Snapshot Studio is persistent, so a source can be replaced while the
+        workspace is already active.  Both ``Current View`` and the camera and
+        renderer restored on exit must then describe the new scene, never the
+        previously loaded PC/native document.  Renderer-only changes and
+        keep-camera texture reloads intentionally do not call this API.
+        """
+
+        state = self._snapshot_saved_state
+        if not self._snapshot_active or state is None:
+            return False
+        camera = self._camera_state()
+        current_camera = camera.copy()
+        current_camera["pan"] = QPointF(camera["pan"])
+        exit_camera = camera.copy()
+        exit_camera["pan"] = QPointF(camera["pan"])
+        self._snapshot_current_camera = current_camera
+        state["camera"] = exit_camera
+        state["mode"] = self._mode
+        state["source_identity"] = self._snapshot_source_identity()
+        return True
+
     def end_snapshot_mode(self) -> str:
         """Leave Photo Studio and restore the exact prior viewport state."""
 
         state = self._snapshot_saved_state
         if state is not None:
             self._set_camera_state(state["camera"])
-            self._mode = state["mode"]
+            restored_mode = state["mode"]
+            if state.get("source_identity") != \
+                    self._snapshot_source_identity():
+                # An uncommitted source mismatch is fail-closed.  Successful
+                # source replacements use commit_snapshot_source_activation(),
+                # making this branch unnecessary for normal transitions while
+                # same-source native wireframe/material diagnostics restore
+                # exactly as promised.
+                if self._source_kind == "psx_native" \
+                        and restored_mode != PSX_NATIVE_VIEW_MODE:
+                    restored_mode = PSX_NATIVE_VIEW_MODE
+                elif self._source_kind != "psx_native" \
+                        and restored_mode == PSX_NATIVE_VIEW_MODE:
+                    restored_mode = "textured"
+            self._mode = restored_mode
             self._anim_timer.setInterval(
                 33 if self._mode == "textured_indexed" else 16)
             self._show_sen = state["show_sen"]
@@ -3315,26 +4022,35 @@ class AssetViewport(QWidget):
         self._yaw, self._pitch = angles
         self._fit_view_to_model(target_size, zoom_percent)
 
-    def _fit_view_to_model(self, target_size,
-                           zoom_percent: int = 100) -> None:
-        """Center canonical presets on all visible geometry."""
+    def _fitted_camera_state(
+            self, target_size, zoom_percent: int = 100, *,
+            yaw: float | None = None,
+            pitch: float | None = None) -> dict | None:
+        """Return a fitted camera without changing the operator's view."""
 
         points = [vertex for face in self._faces for vertex in face.vertices]
         width = max(1, int(target_size.width()))
         height = max(1, int(target_size.height()))
         if not points:
-            return
+            return None
         xs = [point[0] for point in points]
         ys = [point[1] for point in points]
         zs = [point[2] for point in points]
-        self._center = ((min(xs) + max(xs)) / 2,
-                        (min(ys) + max(ys)) / 2,
-                        (min(zs) + max(zs)) / 2)
+        center = ((min(xs) + max(xs)) / 2,
+                  (min(ys) + max(ys)) / 2,
+                  (min(zs) + max(zs)) / 2)
         extent = max(max(xs) - min(xs), max(ys) - min(ys),
                      max(zs) - min(zs), 1e-6)
-        self._scale = 2.0 / extent
-        self._pan = QPointF(0.0, 0.0)
-        camera_points = [self._camera_vertex(point) for point in points]
+        camera = {
+            "yaw": self._yaw if yaw is None else float(yaw),
+            "pitch": self._pitch if pitch is None else float(pitch),
+            "zoom": 1.0,
+            "pan": QPointF(0.0, 0.0),
+            "center": center,
+            "scale": 2.0 / extent,
+        }
+        camera_points = [
+            self._camera_vertex(point, camera) for point in points]
         base_focal = min(width, height) * 1.5
         # Keep a small fixed safety border; the public control is a direct
         # zoom percentage rather than an implementation-oriented margin.
@@ -3351,26 +4067,114 @@ class AssetViewport(QWidget):
                 limits.append(half_height * denominator
                               / (abs(y) * base_focal))
         zoom_factor = max(25, min(300, zoom_percent)) / 100.0
-        self._zoom = max(0.08, min(30.0, min(limits) * zoom_factor))
+        camera["zoom"] = max(
+            0.08, min(30.0, min(limits) * zoom_factor))
+        return camera
+
+    def _fit_view_to_model(self, target_size,
+                           zoom_percent: int = 100) -> None:
+        """Center canonical presets on all visible geometry."""
+
+        camera = self._fitted_camera_state(target_size, zoom_percent)
+        if camera is None:
+            return
+        self._set_camera_state(camera)
         self.update()
+
+    def _native_snapshot_source_identity(self) -> dict:
+        """Freeze the active native build, mesh and pack transaction identity."""
+
+        build = self._psx_build
+        mesh = self._psx_mesh
+        texture_pack = self._psx_texture_pack
+        return {
+            "source_kind": self._source_kind,
+            "build_object": build,
+            "mesh_object": mesh,
+            "mesh_path": mesh.logical_path if mesh is not None else None,
+            "mesh_sha256": mesh.body_sha256 if mesh is not None else None,
+            "texture_pack_object": texture_pack,
+            "texture_pack_path": (
+                texture_pack.logical_path
+                if texture_pack is not None else None),
+            "texture_pack_sha256": (
+                texture_pack.source_sha256
+                if texture_pack is not None else None),
+            "texture_pack_layout_id": (
+                texture_pack.layout_id
+                if texture_pack is not None else None),
+            "build_fingerprint": tuple(self._psx_build_fingerprint),
+            "build_provenance": copy.deepcopy(self._psx_source_info),
+        }
+
+    def _native_snapshot_source_matches(self, identity: dict) -> bool:
+        """Return whether a frozen native export selection is still active."""
+
+        return bool(
+            self._source_kind == identity["source_kind"]
+            and self._psx_build is identity["build_object"]
+            and self._psx_mesh is identity["mesh_object"]
+            and self._psx_texture_pack is identity["texture_pack_object"]
+            and (
+                self._psx_mesh.logical_path
+                if self._psx_mesh is not None else None
+            ) == identity["mesh_path"]
+            and (
+                self._psx_mesh.body_sha256
+                if self._psx_mesh is not None else None
+            ) == identity["mesh_sha256"]
+            and (
+                self._psx_texture_pack.logical_path
+                if self._psx_texture_pack is not None else None
+            ) == identity["texture_pack_path"]
+            and (
+                self._psx_texture_pack.source_sha256
+                if self._psx_texture_pack is not None else None
+            ) == identity["texture_pack_sha256"]
+            and (
+                self._psx_texture_pack.layout_id
+                if self._psx_texture_pack is not None else None
+            ) == identity["texture_pack_layout_id"]
+            and tuple(self._psx_build_fingerprint)
+            == identity["build_fingerprint"]
+            and self._psx_source_info == identity["build_provenance"]
+        )
 
     def render_snapshot(self, target_size, background: QColor | None,
                         include_guides: bool = False) -> QImage:
-        """Render the visible model directly into an alpha-capable QImage."""
+        """Render the active source directly into an alpha-capable QImage.
+
+        A native source always selects the native renderer for this immutable
+        export transaction, even if an editor toolbar was temporarily left in
+        wireframe, solid or materials mode.
+        """
 
         width = int(target_size.width())
         height = int(target_size.height())
         # Start a new metadata transaction before every early return and
         # preflight.  A failed attempt must never expose the exact hash or
         # effective renderer from the preceding successful snapshot.
-        self._last_render_requested_mode = self._mode
+        native_source = self._source_kind == "psx_native"
+        snapshot_mode = (
+            PSX_NATIVE_VIEW_MODE if native_source else self._mode)
+        self._last_render_requested_mode = snapshot_mode
         self._last_effective_renderer = "not_rendered"
         self._last_render_fallback_reason = ""
         self._last_render_background = "not_rendered"
         self._last_indexed_stats = {}
+        if (native_source and self._psx_mesh is None) or (
+                self._mode == PSX_NATIVE_VIEW_MODE and not native_source):
+            self._last_render_fallback_reason = (
+                "no decoded native PSX mesh is loaded")
+            raise RuntimeError(
+                "Native PSX snapshot requires a decoded PSW/PSV/PW3 mesh; "
+                "no PC/OpenUA fallback was used.")
         if not self._faces or width <= 0 or height <= 0:
             return QImage()
-        if self._mode == "textured_indexed":
+        psx_identity = (
+            self._native_snapshot_source_identity()
+            if native_source else None)
+        if snapshot_mode == "textured_indexed":
             try:
                 self._validate_indexed_pixel_budget(width, height)
             except RuntimeError as exc:
@@ -3386,10 +4190,19 @@ class AssetViewport(QWidget):
                 clean=not include_guides,
                 camera=self._camera_state(),
                 allow_transparent_background=True,
+                renderer_mode_override=(
+                    PSX_NATIVE_VIEW_MODE if native_source else None),
             )
         finally:
             painter.end()
-        if self._mode == "textured_indexed" \
+        if psx_identity is not None and not (
+                self._native_snapshot_source_matches(psx_identity)):
+            self._last_effective_renderer = "not_rendered"
+            self._last_render_fallback_reason = (
+                "the native PSX scene changed during rendering")
+            raise RuntimeError(
+                "Native PSX source changed during snapshot rendering")
+        if snapshot_mode == "textured_indexed" \
                 and self._last_effective_renderer \
                 not in INDEXED_EFFECTIVE_RENDERERS:
             reason = (
@@ -3400,17 +4213,66 @@ class AssetViewport(QWidget):
             raise RuntimeError(
                 "Retail indexed snapshot aborted instead of exporting an "
                 f"OpenUA fallback: {reason}")
-        if self._mode == PSX_PROTOTYPE_VIEW_MODE \
+        if native_source \
                 and self._last_effective_renderer \
-                != PSX_PROTOTYPE_PROFILE_ID:
+                != PSX_NATIVE_PROFILE_ID:
             reason = (
                 self._last_render_fallback_reason
-                or "the PSX prototype visualization pass did not complete"
+                or "the native PSX asset pass did not complete"
             )
             raise RuntimeError(
-                "PSX prototype visualization snapshot aborted instead of "
-                f"exporting a mislabeled fallback: {reason}")
+                "Native PSX snapshot aborted instead of exporting a "
+                f"mislabeled fallback: {reason}")
         return image
+
+    def native_render_has_visible_pixels(
+            self, target_size: QSize | None = None) -> bool | None:
+        """Probe native model pixels without changing renderer provenance.
+
+        ``None`` means no native scene is active.  A transparent clean pass is
+        used so the result describes model pixels rather than the viewport
+        background, grid, axes, or diagnostics.  The probe intentionally uses
+        the normal PW3 bit-14/NCLIP path; it never relaxes native culling.
+        """
+
+        if self._source_kind != "psx_native" \
+                or self._psx_mesh is None or not self._faces:
+            return None
+        size = target_size or QSize(max(1, self.width()), max(1, self.height()))
+        width = max(1, int(size.width()))
+        height = max(1, int(size.height()))
+        image = QImage(
+            width, height, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(Qt.GlobalColor.transparent)
+        metadata = (
+            self._last_render_requested_mode,
+            self._last_effective_renderer,
+            self._last_render_fallback_reason,
+            self._last_render_background,
+            copy.deepcopy(self._last_indexed_stats),
+        )
+        painter = QPainter(image)
+        try:
+            self._render_scene(
+                painter,
+                QRectF(0, 0, width, height),
+                None,
+                clean=True,
+                camera=self._camera_state(),
+                allow_transparent_background=True,
+                renderer_mode_override=PSX_NATIVE_VIEW_MODE,
+            )
+        finally:
+            painter.end()
+            (
+                self._last_render_requested_mode,
+                self._last_effective_renderer,
+                self._last_render_fallback_reason,
+                self._last_render_background,
+                self._last_indexed_stats,
+            ) = metadata
+        alpha = image.convertToFormat(QImage.Format.Format_Alpha8)
+        return any(alpha.constBits()[:alpha.sizeInBytes()])
 
     @staticmethod
     def _validate_indexed_pixel_budget(width: int, height: int) -> None:
@@ -3426,8 +4288,16 @@ class AssetViewport(QWidget):
     def reset_view(self) -> None:
         self._yaw = self.RESET_YAW
         self._pitch = self.RESET_PITCH
-        self._zoom = self.RESET_ZOOM
         self._pan = QPointF(0.0, 0.0)
+        if self._source_kind == "psx_native" and self._faces:
+            # Native archives span tiny cards through oversized rings.  Reset
+            # therefore means the canonical orientation fitted to the current
+            # viewport, not the PC preview's fixed zoom.  This runs only on an
+            # explicit load/reset; keep_camera reloads preserve operator state.
+            self._fit_view_to_model(
+                QSize(max(1, self.width()), max(1, self.height())))
+            return
+        self._zoom = self.RESET_ZOOM
         self.update()
 
     def fit_view(self) -> None:
@@ -3739,6 +4609,12 @@ class AssetViewport(QWidget):
     def paintGL_stub(self):  # pragma: no cover - kept for API parity
         pass
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        """Publish passive viewport-size changes without faking navigation."""
+
+        super().resizeEvent(event)
+        self.viewportResized.emit()
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
         painter = QPainter(self)
         background = self._snapshot_background
@@ -3895,12 +4771,22 @@ class AssetViewport(QWidget):
     def _render_scene(self, painter: QPainter, target: QRectF,
                       background: QColor | None, clean: bool,
                       camera: dict,
-                      allow_transparent_background: bool = False) -> None:
+                      allow_transparent_background: bool = False,
+                      renderer_mode_override: str | None = None) -> None:
         """Shared QWidget/QImage renderer; ``clean`` draws model pixels only."""
 
-        mode = self._mode if clean and self._mode in TEXTURED_VIEW_MODES \
-            else ("textured" if clean else self._mode)
-        psx_visual = mode == PSX_PROTOTYPE_VIEW_MODE
+        if renderer_mode_override is not None:
+            if renderer_mode_override not in VIEW_MODES:
+                raise ValueError("invalid renderer mode override")
+            mode = renderer_mode_override
+        elif clean and self._source_kind == "psx_native":
+            mode = PSX_NATIVE_VIEW_MODE
+        elif clean:
+            mode = (self._mode if self._mode in TEXTURED_VIEW_MODES
+                    else "textured")
+        else:
+            mode = self._mode
+        psx_native = mode == PSX_NATIVE_VIEW_MODE
 
         # While the camera is actively moving, favor response time over
         # sub-pixel filtering.  Mouse release immediately requests a normal
@@ -3910,10 +4796,10 @@ class AssetViewport(QWidget):
         camera_preview = self._camera_interacting and not clean
         painter.setRenderHint(
             QPainter.RenderHint.Antialiasing,
-            not camera_preview and not psx_visual)
+            not camera_preview and not psx_native)
         painter.setRenderHint(
             QPainter.RenderHint.SmoothPixmapTransform,
-            not camera_preview and not psx_visual)
+            not camera_preview and not psx_native)
         if background is not None:
             painter.fillRect(target, background)
         elif not allow_transparent_background:
@@ -3922,11 +4808,23 @@ class AssetViewport(QWidget):
         if not self._faces:
             if not clean:
                 painter.setPen(QColor(180, 185, 192))
-                painter.drawText(target, Qt.AlignmentFlag.AlignCenter,
-                                 "Open a .base to assemble resources "
-                                 "automatically,\nor a .bas to browse all "
-                                 "packed resources.")
+                empty = (
+                    "Choose an extracted PlayStation prototype source and "
+                    "load a native PSW/PSV/PW3 mesh."
+                    if self._mode == PSX_NATIVE_VIEW_MODE else
+                    "Open a .base to assemble resources automatically,\n"
+                    "or a .bas to browse all packed resources.")
+                painter.drawText(
+                    target, Qt.AlignmentFlag.AlignCenter, empty)
             return
+
+        if psx_native and (
+                self._source_kind != "psx_native"
+                or self._psx_mesh is None):
+            self._last_effective_renderer = "not_rendered"
+            self._last_render_fallback_reason = (
+                "the active scene is not a decoded native PSX mesh")
+            raise RuntimeError(self._last_render_fallback_reason)
 
         if self._show_grid and not clean:
             self._draw_grid(painter, target, camera)
@@ -3946,8 +4844,8 @@ class AssetViewport(QWidget):
                 self._indexed_unavailable_reason
                 if self._indexed_adapter is None else "indexed pass pending"
             )
-        elif mode == PSX_PROTOTYPE_VIEW_MODE:
-            self._last_effective_renderer = PSX_PROTOTYPE_PROFILE_ID
+        elif mode == PSX_NATIVE_VIEW_MODE:
+            self._last_effective_renderer = PSX_NATIVE_PROFILE_ID
             self._last_render_fallback_reason = ""
         else:
             self._last_effective_renderer = (
@@ -3958,10 +4856,20 @@ class AssetViewport(QWidget):
         source_polygons: dict[int, QPolygonF] = {}
         visible_faces: set[int] = set()
         highlight_paths: dict[int, QPainterPath] = {}
-        def draw_piece(face: ViewFace, piece_camera, piece_uvs,
+        def draw_piece(face: ViewFace, piece_camera, piece_attributes,
                        image: QImage | None,
                        front_facing: bool,
                        draw_model: bool = True) -> None:
+            piece_uvs = tuple(
+                (attributes[0], attributes[1])
+                for attributes in piece_attributes)
+            native_corner_shades = (
+                tuple(attributes[2] for attributes in piece_attributes)
+                if piece_attributes
+                and all(len(attributes) >= 3
+                        for attributes in piece_attributes)
+                else None
+            )
             screen = [
                 self._project(point, target, camera)
                 for point in piece_camera
@@ -3978,7 +4886,8 @@ class AssetViewport(QWidget):
                 self._draw_face(painter, face, screen, mode=mode,
                                 draw_wire=False,
                                 camera_vertices=piece_camera,
-                                texture_override=(image, piece_uvs))
+                                texture_override=(image, piece_uvs),
+                                native_corner_shades=native_corner_shades)
             if not clean and self._mapping_diagnostics and face.mapped \
                     and face.primary and face.poly_id in self._duplicate_polys:
                 painter.setPen(Qt.PenStyle.NoPen)
@@ -4108,6 +5017,38 @@ class AssetViewport(QWidget):
                 cam = tuple(
                     self._camera_vertex(vertex, camera)
                     for vertex in face.vertices)
+                psx_source_front_facing = None
+                if psx_native:
+                    if face.native_mesh_format_id not in {"PW3", "PSW/PSV"}:
+                        raise RuntimeError(
+                            "native PSX face lacks a supported submission "
+                            "profile")
+                    if len(cam) != 4:
+                        raise RuntimeError(
+                            "native PSX face lost one of its four raw corner "
+                            "slots")
+                    if face.native_mesh_format_id == "PW3" \
+                            and face.native_pw3_primitive_flags is None:
+                        raise RuntimeError(
+                            "native PW3 face lost its primitive flags")
+                    requires_nclip = (
+                        face.native_mesh_format_id == "PSW/PSV"
+                        or not (
+                            face.native_pw3_primitive_flags
+                            & PW3_TWO_SIDED_FLAG))
+                    if requires_nclip:
+                        # The legacy renderer runs this unconditionally; PW3
+                        # runs it unless bit 14 requests the two-sided path.
+                        # Preserve the source-face decision so a later clipped
+                        # fan triangle cannot resurrect the primitive.
+                        raw_screen_corners = tuple(
+                            self._project(point, target, camera)
+                            for point in cam)
+                        psx_source_front_facing = (
+                            _pw3_packet_nclip_front_facing(
+                                raw_screen_corners))
+                        if not psx_source_front_facing:
+                            continue
                 source_polygons[id(face)] = QPolygonF([
                     self._project(point, target, camera) for point in cam])
                 mat = self._materials[face.material]
@@ -4120,6 +5061,11 @@ class AssetViewport(QWidget):
                     uv_mapping_valid = False
                     face_uvs = [(0.0, 0.0)] * len(cam)
                     image = None
+                if psx_native and face.native_mesh_format_id == "PSW/PSV" \
+                        and len(face.native_raw_corner_shades) != len(cam):
+                    raise RuntimeError(
+                        "native PSW/PSV face lost one or more authored "
+                        "corner shades")
                 indexed_face_front_facing = None
                 if mode == "textured_indexed" and len(cam) >= 3:
                     # Retail culls the complete source polygon from its first
@@ -4136,10 +5082,19 @@ class AssetViewport(QWidget):
                 for index in range(2, len(cam)):
                     indices = (0, index, index - 1)
                     tri_camera = tuple(cam[item] for item in indices)
+                    tri_attributes = []
+                    for item in indices:
+                        uv = face_uvs[item]
+                        attributes = (float(uv[0]), float(uv[1]))
+                        if psx_native \
+                                and face.native_mesh_format_id == "PSW/PSV":
+                            attributes += (
+                                float(face.native_raw_corner_shades[item]),)
+                        tri_attributes.append(attributes)
                     clipped = clip_camera_polygon_near(
                         CameraPolygon(
                             tri_camera,
-                            tuple(tuple(face_uvs[item]) for item in indices),
+                            tuple(tri_attributes),
                             None,
                             source_order,
                         ),
@@ -4176,10 +5131,13 @@ class AssetViewport(QWidget):
                         for item in range(3)
                     )
                     front_facing = (
-                        indexed_face_front_facing
-                        if indexed_face_front_facing is not None
-                        else self._front_facing_from_screen_area(area))
-                    if (mode != "textured_indexed"
+                        psx_source_front_facing
+                        if psx_source_front_facing is not None
+                        else (
+                            indexed_face_front_facing
+                            if indexed_face_front_facing is not None
+                            else self._front_facing_from_screen_area(area)))
+                    if (mode not in {"textured_indexed", PSX_NATIVE_VIEW_MODE}
                             and self._backface_cull and not front_facing):
                         continue
                     triangles.append(CameraPolygon(
@@ -4242,9 +5200,7 @@ class AssetViewport(QWidget):
                 payload = piece.payload
                 draw_piece(
                     payload.face, piece.vertices,
-                    tuple(
-                        (attributes[0], attributes[1])
-                        for attributes in piece.attributes),
+                    piece.attributes,
                     payload.image,
                     payload.front_facing,
                     draw_model=(not indexed_active
@@ -4655,7 +5611,8 @@ class AssetViewport(QWidget):
                    screen: list[QPointF], mode: str | None = None,
                    draw_wire: bool | None = None,
                    camera_vertices=None,
-                   texture_override=None) -> None:
+                   texture_override=None,
+                   native_corner_shades=None) -> None:
         polygon = QPolygonF(screen)
         mat = self._materials[face.material]
         mode = mode or self._mode
@@ -4693,12 +5650,27 @@ class AssetViewport(QWidget):
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(color)
                 painter.drawPolygon(polygon)
+            elif mode == PSX_NATIVE_VIEW_MODE \
+                    and face.native_mesh_format_id == "PSW/PSV":
+                if mat.native_psx_material is None:
+                    raise RuntimeError(
+                        "textured native PSW/PSV face lost its indexed "
+                        "material source")
+                if native_corner_shades is None \
+                        or len(native_corner_shades) != len(screen) \
+                        or len(uvs) != len(screen):
+                    raise RuntimeError(
+                        "textured native PSW/PSV face lost its clipped "
+                        "UV/shade attributes")
+                self._draw_psw_textured(
+                    painter, screen, uvs, native_corner_shades,
+                    mat.native_psx_material)
             else:
                 self._draw_textured(painter, screen, uvs, image,
                                     additive=mat.additive,
                                     camera_vertices=camera_vertices,
                                     perspective_correct=(
-                                        mode != PSX_PROTOTYPE_VIEW_MODE))
+                                        mode != PSX_NATIVE_VIEW_MODE))
 
         if draw_wire:
             painter.setPen(QPen(QColor(0, 0, 0, 130), 0.75))
@@ -4737,6 +5709,61 @@ class AssetViewport(QWidget):
                 and len(mat.anim_uv_groups[uv_id]) == len(face.vertices)
             )
         return len(face.uvs) == len(face.vertices)
+
+    @staticmethod
+    def _draw_psw_textured(
+            painter: QPainter,
+            screen: list[QPointF],
+            uvs,
+            corner_shades,
+            material: PsxNativeMaterial) -> None:
+        """Composite recovered legacy PSW affine grayscale modulation.
+
+        This is intentionally not a general PSX GPU pass.  The bounded helper
+        applies the bounded material-local UV quotient directly, plus the
+        executable-backed legacy packet colour path, nearest native texture
+        sampling, BGR555 modulation, and zero-word discard.  Descriptor
+        origin, TPage, CLUT offset, runtime material binding, STP/ABR, GTE
+        snapping, ordering-table traversal, dithering, and PW3 dispatch remain
+        outside this renderer until their missing bindings are proven.
+        """
+
+        device = painter.device()
+        if device is None or device.width() <= 0 or device.height() <= 0:
+            raise RuntimeError(
+                "native PSW/PSV raster requires an active paint device")
+        for index in range(2, len(screen)):
+            triangle = (screen[0], screen[index], screen[index - 1])
+            double_area = sum(
+                triangle[corner].x()
+                * triangle[(corner + 1) % 3].y()
+                - triangle[(corner + 1) % 3].x()
+                * triangle[corner].y()
+                for corner in range(3))
+            if not math.isfinite(double_area) or abs(double_area) <= 1.0e-9:
+                continue
+            patch = rasterize_legacy_psw_triangle(
+                device.width(),
+                device.height(),
+                tuple((point.x(), point.y()) for point in triangle),
+                (uvs[0], uvs[index], uvs[index - 1]),
+                (corner_shades[0], corner_shades[index],
+                 corner_shades[index - 1]),
+                material,
+            )
+            if patch.is_empty:
+                continue
+            image = QImage(
+                patch.rgba,
+                patch.width,
+                patch.height,
+                patch.width * 4,
+                QImage.Format.Format_RGBA8888,
+            ).copy()
+            if image.isNull():
+                raise RuntimeError(
+                    "native PSW/PSV raster produced a null RGBA patch")
+            painter.drawImage(QPointF(patch.origin_x, patch.origin_y), image)
 
     def _draw_textured(self, painter: QPainter, screen: list[QPointF],
                        uvs: list[tuple[int, int]], image: QImage,
